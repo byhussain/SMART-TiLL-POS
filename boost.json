@@ -6,8 +6,12 @@
     "herd_mcp": false,
     "mcp": true,
     "nightwatch_mcp": false,
+    "packages": [
+        "filament/filament"
+    ],
     "sail": false,
     "skills": [
-        "pest-testing"
+        "pest-testing",
+        "tailwindcss-development"
     ]
 }
