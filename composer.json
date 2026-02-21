@@ -15,7 +15,8 @@
         "laravel/tinker": "^2.10.1",
         "nativephp/desktop": "^2.1",
         "smart-daddy/catalog-brand": "^1.0",
-        "smart-daddy/catalog-category": "^1.0"
+        "smart-daddy/catalog-category": "^1.0",
+        "smart-daddy/catalog-unit": "^1.0"
     },
     "require-dev": {
         "fakerphp/faker": "^1.23",
