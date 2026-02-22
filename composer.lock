@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "a3d1b3347aca8db6a17cf618a858a2aa",
+    "content-hash": "88c1dfca8f38315d5878de9667d6f796",
     "packages": [
         {
             "name": "anourvalar/eloquent-serialize",
@@ -5251,6 +5251,54 @@
                 }
             ],
             "time": "2022-12-17T21:53:22+00:00"
+        },
+        {
+            "name": "smart-daddy/catalog-attribute",
+            "version": "v1.0.1",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/SMART-DADDY/Catalog-Attribute.git",
+                "reference": "5043a0eeecef530bd464268988a58bcf8d034011"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/SMART-DADDY/Catalog-Attribute/zipball/5043a0eeecef530bd464268988a58bcf8d034011",
+                "reference": "5043a0eeecef530bd464268988a58bcf8d034011",
+                "shasum": ""
+            },
+            "require": {
+                "filament/filament": "^5.0",
+                "laravel/framework": "^12.0",
+                "php": "^8.4"
+            },
+            "require-dev": {
+                "orchestra/testbench": "^10.0",
+                "pestphp/pest": "^4.0",
+                "pestphp/pest-plugin-laravel": "^4.0"
+            },
+            "type": "library",
+            "extra": {
+                "laravel": {
+                    "providers": [
+                        "SmartDaddy\\CatalogAttribute\\CatalogAttributeServiceProvider"
+                    ]
+                }
+            },
+            "autoload": {
+                "psr-4": {
+                    "SmartDaddy\\CatalogAttribute\\": "src/"
+                }
+            },
+            "notification-url": "https://packagist.org/downloads/",
+            "license": [
+                "MIT"
+            ],
+            "description": "Attribute module for SMART-TiLL",
+            "support": {
+                "issues": "https://github.com/SMART-DADDY/Catalog-Attribute/issues",
+                "source": "https://github.com/SMART-DADDY/Catalog-Attribute/tree/v1.0.1"
+            },
+            "time": "2026-02-22T10:16:32+00:00"
         },
         {
             "name": "smart-daddy/catalog-brand",
