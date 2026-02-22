@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "7ae3ef2dd695028fb6e2731e7caff9fa",
+    "content-hash": "7be4300bc39aee085ed263ee96265f69",
     "packages": [
         {
             "name": "anourvalar/eloquent-serialize",
@@ -5398,16 +5398,16 @@
         },
         {
             "name": "smart-daddy/catalog-product",
-            "version": "v1.0.5",
+            "version": "1.0.8",
             "source": {
                 "type": "git",
                 "url": "https://github.com/SMART-DADDY/Catalog-Product.git",
-                "reference": "2a887a622350d0de7102b4173233fe6e48e334f4"
+                "reference": "18bd44932a7a3b7a3c964a6b8b240b409ffb00e9"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/SMART-DADDY/Catalog-Product/zipball/2a887a622350d0de7102b4173233fe6e48e334f4",
-                "reference": "2a887a622350d0de7102b4173233fe6e48e334f4",
+                "url": "https://api.github.com/repos/SMART-DADDY/Catalog-Product/zipball/18bd44932a7a3b7a3c964a6b8b240b409ffb00e9",
+                "reference": "18bd44932a7a3b7a3c964a6b8b240b409ffb00e9",
                 "shasum": ""
             },
             "require": {
@@ -5440,9 +5440,9 @@
             "description": "Product module for SMART-TiLL",
             "support": {
                 "issues": "https://github.com/SMART-DADDY/Catalog-Product/issues",
-                "source": "https://github.com/SMART-DADDY/Catalog-Product/tree/v1.0.5"
+                "source": "https://github.com/SMART-DADDY/Catalog-Product/tree/1.0.8"
             },
-            "time": "2026-02-22T14:19:04+00:00"
+            "time": "2026-02-22T17:52:37+00:00"
         },
         {
             "name": "smart-daddy/catalog-unit",
@@ -5491,6 +5491,53 @@
                 "source": "https://github.com/SMART-DADDY/Catalog-Unit/tree/v1.0.1"
             },
             "time": "2026-02-21T22:06:56+00:00"
+        },
+        {
+            "name": "smart-daddy/imagable",
+            "version": "v1.0.0",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/SMART-DADDY/Imagable.git",
+                "reference": "bafa4dd6899080573af2ba44e446cf62b29a2d69"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/SMART-DADDY/Imagable/zipball/bafa4dd6899080573af2ba44e446cf62b29a2d69",
+                "reference": "bafa4dd6899080573af2ba44e446cf62b29a2d69",
+                "shasum": ""
+            },
+            "require": {
+                "laravel/framework": "^12.0",
+                "php": "^8.4"
+            },
+            "require-dev": {
+                "orchestra/testbench": "^10.0",
+                "pestphp/pest": "^4.0",
+                "pestphp/pest-plugin-laravel": "^4.0"
+            },
+            "type": "library",
+            "extra": {
+                "laravel": {
+                    "providers": [
+                        "SmartDaddy\\Imagable\\ImagableServiceProvider"
+                    ]
+                }
+            },
+            "autoload": {
+                "psr-4": {
+                    "SmartDaddy\\Imagable\\": "src/"
+                }
+            },
+            "notification-url": "https://packagist.org/downloads/",
+            "license": [
+                "MIT"
+            ],
+            "description": "Imagable module for SMART-TiLL",
+            "support": {
+                "issues": "https://github.com/SMART-DADDY/Imagable/issues",
+                "source": "https://github.com/SMART-DADDY/Imagable/tree/v1.0.0"
+            },
+            "time": "2026-02-22T17:11:22+00:00"
         },
         {
             "name": "spatie/invade",
