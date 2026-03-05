@@ -2,7 +2,30 @@
 
 namespace App\Providers;
 
+use App\Observers\DispatchCloudSyncObserver;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
+use SmartTill\Core\Models\Attribute;
+use SmartTill\Core\Models\Brand;
+use SmartTill\Core\Models\Category;
+use SmartTill\Core\Models\Customer;
+use SmartTill\Core\Models\Payment;
+use SmartTill\Core\Models\Product;
+use SmartTill\Core\Models\ProductAttribute;
+use SmartTill\Core\Models\PurchaseOrder;
+use SmartTill\Core\Models\PurchaseOrderProduct;
+use SmartTill\Core\Models\Sale;
+use SmartTill\Core\Models\SalePreparableItem;
+use SmartTill\Core\Models\SaleVariation;
+use SmartTill\Core\Models\Stock;
+use SmartTill\Core\Models\StoreSetting;
+use SmartTill\Core\Models\Supplier;
+use SmartTill\Core\Models\Transaction;
+use SmartTill\Core\Models\Unit;
+use SmartTill\Core\Models\UnitDimension;
+use SmartTill\Core\Models\Variation;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -19,6 +42,64 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
-        //
+        $observer = app(DispatchCloudSyncObserver::class);
+
+        foreach ($this->syncObservedModels() as $modelClass) {
+            if (class_exists($modelClass) && is_subclass_of($modelClass, Model::class)) {
+                $modelClass::observe($observer);
+            }
+        }
+
+        Sale::creating(function (Sale $sale): void {
+            if (trim((string) ($sale->reference ?? '')) !== '') {
+                return;
+            }
+
+            if (! Schema::hasTable('sales') || ! Schema::hasColumn('sales', 'reference')) {
+                return;
+            }
+
+            $storeId = (int) ($sale->store_id ?? 0);
+            if ($storeId <= 0) {
+                return;
+            }
+
+            $nextReference = (int) DB::table('sales')
+                ->where('store_id', $storeId)
+                ->whereNotNull('reference')
+                ->pluck('reference')
+                ->map(static fn ($value): int => (int) $value)
+                ->max() + 1;
+
+            $sale->reference = (string) $nextReference;
+        });
+    }
+
+    /**
+     * @return array<int, class-string<Model>>
+     */
+    private function syncObservedModels(): array
+    {
+        return [
+            StoreSetting::class,
+            Brand::class,
+            Category::class,
+            Attribute::class,
+            Unit::class,
+            UnitDimension::class,
+            Product::class,
+            ProductAttribute::class,
+            Variation::class,
+            Stock::class,
+            Customer::class,
+            Supplier::class,
+            PurchaseOrder::class,
+            PurchaseOrderProduct::class,
+            Sale::class,
+            SaleVariation::class,
+            SalePreparableItem::class,
+            Payment::class,
+            Transaction::class,
+        ];
     }
 }

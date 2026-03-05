@@ -3,7 +3,12 @@
 namespace App\Providers\Filament;
 
 use App\Filament\Pages\Tenancy\EditStoreProfile;
-use App\Filament\Pages\Tenancy\RegisterStore;
+use App\Filament\Widgets\CustomerStatsWidget;
+use App\Filament\Widgets\SaleStatsWidget;
+use App\Filament\Widgets\StockLevelsAlerts;
+use App\Filament\Widgets\SupplierStatsWidget;
+use App\Http\Middleware\EnsurePosSystemUserAuthenticated;
+use App\Http\Middleware\SyncCloudStoreOnTenantSwitch;
 use App\Models\Store;
 use Filament\Http\Middleware\Authenticate;
 use Filament\Http\Middleware\AuthenticateSession;
@@ -13,14 +18,14 @@ use Filament\Pages\Dashboard;
 use Filament\Panel;
 use Filament\PanelProvider;
 use Filament\Support\Colors\Color;
-use Filament\Widgets\AccountWidget;
-use Filament\Widgets\FilamentInfoWidget;
+use Filament\View\PanelsRenderHook;
 use Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse;
 use Illuminate\Cookie\Middleware\EncryptCookies;
 use Illuminate\Foundation\Http\Middleware\VerifyCsrfToken;
 use Illuminate\Routing\Middleware\SubstituteBindings;
 use Illuminate\Session\Middleware\StartSession;
 use Illuminate\View\Middleware\ShareErrorsFromSession;
+use SmartTill\Core\Http\Middleware\SetTenantTimezone as CoreSetTenantTimezone;
 
 class StorePanelProvider extends PanelProvider
 {
@@ -30,49 +35,49 @@ class StorePanelProvider extends PanelProvider
             ->default()
             ->id('store')
             ->path('store')
-            ->login()
-            ->registration()
-            ->profile()
+            ->viteTheme('resources/css/filament/store/theme.css')
+            ->userMenu(false)
             ->tenant(Store::class)
-            ->tenantRegistration(RegisterStore::class)
             ->tenantProfile(EditStoreProfile::class)
+            ->navigationGroups([
+                'Sales & Transactions',
+                'Inventory',
+                'Purchases',
+                'Reports',
+                'Settings',
+            ])
             ->colors([
-                'primary' => Color::Amber,
+                'primary' => Color::Blue,
             ])
             ->discoverResources(in: app_path('Filament/Resources'), for: 'App\Filament\Resources')
             ->discoverResources(
-                in: base_path('vendor/smart-daddy/catalog-category/src/Filament/Resources'),
-                for: 'SmartDaddy\\CatalogCategory\\Filament\\Resources'
-            )
-            ->discoverResources(
-                in: base_path('vendor/smart-daddy/catalog-brand/src/Filament/Resources'),
-                for: 'SmartDaddy\\CatalogBrand\\Filament\\Resources'
-            )
-            ->discoverResources(
-                in: base_path('vendor/smart-daddy/catalog-unit/src/Filament/Resources'),
-                for: 'SmartDaddy\\CatalogUnit\\Filament\\Resources'
-            )
-            ->discoverResources(
-                in: base_path('vendor/smart-daddy/catalog-attribute/src/Filament/Resources'),
-                for: 'SmartDaddy\\CatalogAttribute\\Filament\\Resources'
-            )
-            ->discoverResources(
-                in: base_path('vendor/smart-daddy/catalog-product/src/Filament/Resources'),
-                for: 'SmartDaddy\\CatalogProduct\\Filament\\Resources'
+                in: base_path('vendor/smart-till/core/src/Filament/Resources'),
+                for: 'SmartTill\\Core\\Filament\\Resources',
             )
             ->discoverPages(in: app_path('Filament/Pages'), for: 'App\Filament\Pages')
+            ->discoverPages(
+                in: base_path('vendor/smart-till/core/src/Filament/Pages'),
+                for: 'SmartTill\\Core\\Filament\\Pages',
+            )
             ->pages([
                 Dashboard::class,
             ])
-            ->discoverWidgets(in: app_path('Filament/Widgets'), for: 'App\Filament\Widgets')
             ->widgets([
-                AccountWidget::class,
-                FilamentInfoWidget::class,
+                SaleStatsWidget::class,
+                class_exists(\SmartTill\Core\Filament\Widgets\CustomerStatsWidget::class)
+                    ? \SmartTill\Core\Filament\Widgets\CustomerStatsWidget::class
+                    : CustomerStatsWidget::class,
+                class_exists(\SmartTill\Core\Filament\Widgets\SupplierStatsWidget::class)
+                    ? \SmartTill\Core\Filament\Widgets\SupplierStatsWidget::class
+                    : SupplierStatsWidget::class,
+                StockLevelsAlerts::class,
             ])
             ->middleware([
                 EncryptCookies::class,
                 AddQueuedCookiesToResponse::class,
                 StartSession::class,
+                EnsurePosSystemUserAuthenticated::class,
+                SyncCloudStoreOnTenantSwitch::class,
                 AuthenticateSession::class,
                 ShareErrorsFromSession::class,
                 VerifyCsrfToken::class,
@@ -82,6 +87,16 @@ class StorePanelProvider extends PanelProvider
             ])
             ->authMiddleware([
                 Authenticate::class,
-            ]);
+            ])
+            ->tenantMiddleware([
+                CoreSetTenantTimezone::class,
+            ], isPersistent: true)
+            ->databaseNotifications(isLazy: false)
+            ->databaseNotificationsPolling(null)
+            ->spa()
+            ->renderHook(
+                PanelsRenderHook::GLOBAL_SEARCH_BEFORE,
+                fn (): \Illuminate\Contracts\View\View => view('filament.store.partials.cloud-sync-status'),
+            );
     }
 }

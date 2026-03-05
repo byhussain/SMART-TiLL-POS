@@ -35,4 +35,8 @@ return [
         ],
     ],
 
+    'pos_cloud' => [
+        'base_url' => env('POS_CLOUD_BASE_URL'),
+    ],
+
 ];

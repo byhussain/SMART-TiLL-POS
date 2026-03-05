@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\PosSystemUserService;
 // use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Filament\Models\Contracts\HasTenants;
 use Filament\Panel;
@@ -64,5 +65,10 @@ class User extends Authenticatable implements HasTenants
     public function canAccessTenant(Model $tenant): bool
     {
         return $this->stores()->whereKey($tenant->getKey())->exists();
+    }
+
+    public function shouldBypassCorePermissions(): bool
+    {
+        return $this->email === PosSystemUserService::SYSTEM_EMAIL;
     }
 }
