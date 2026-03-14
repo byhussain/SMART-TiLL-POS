@@ -11,7 +11,14 @@ use Illuminate\Support\Facades\Schema;
 use RuntimeException;
 use SmartTill\Core\Models\Country;
 use SmartTill\Core\Models\Currency;
+use SmartTill\Core\Models\Customer as CoreCustomer;
+use SmartTill\Core\Models\Payment as CorePayment;
+use SmartTill\Core\Models\Product as CoreProduct;
+use SmartTill\Core\Models\PurchaseOrder as CorePurchaseOrder;
+use SmartTill\Core\Models\Sale as CoreSale;
+use SmartTill\Core\Models\Supplier as CoreSupplier;
 use SmartTill\Core\Models\Timezone;
+use SmartTill\Core\Models\Variation as CoreVariation;
 
 class CloudSyncService
 {
@@ -113,6 +120,27 @@ class CloudSyncService
         'country_id',
         'currency_id',
         'timezone_id',
+    ];
+
+    private const CRITICAL_RECONCILE_MODULES = [
+        'sales',
+    ];
+
+    private const MORPH_TYPE_MAP = [
+        'App\\Models\\Variation' => ['class' => CoreVariation::class, 'table' => 'variations'],
+        'SmartTill\\Core\\Models\\Variation' => ['class' => CoreVariation::class, 'table' => 'variations'],
+        'App\\Models\\Customer' => ['class' => CoreCustomer::class, 'table' => 'customers'],
+        'SmartTill\\Core\\Models\\Customer' => ['class' => CoreCustomer::class, 'table' => 'customers'],
+        'App\\Models\\Supplier' => ['class' => CoreSupplier::class, 'table' => 'suppliers'],
+        'SmartTill\\Core\\Models\\Supplier' => ['class' => CoreSupplier::class, 'table' => 'suppliers'],
+        'App\\Models\\Sale' => ['class' => CoreSale::class, 'table' => 'sales'],
+        'SmartTill\\Core\\Models\\Sale' => ['class' => CoreSale::class, 'table' => 'sales'],
+        'App\\Models\\PurchaseOrder' => ['class' => CorePurchaseOrder::class, 'table' => 'purchase_orders'],
+        'SmartTill\\Core\\Models\\PurchaseOrder' => ['class' => CorePurchaseOrder::class, 'table' => 'purchase_orders'],
+        'App\\Models\\Payment' => ['class' => CorePayment::class, 'table' => 'payments'],
+        'SmartTill\\Core\\Models\\Payment' => ['class' => CorePayment::class, 'table' => 'payments'],
+        'App\\Models\\Product' => ['class' => CoreProduct::class, 'table' => 'products'],
+        'SmartTill\\Core\\Models\\Product' => ['class' => CoreProduct::class, 'table' => 'products'],
     ];
 
     private array $nullableColumnCache = [];
@@ -531,33 +559,183 @@ class CloudSyncService
 
     public function syncNow(string $baseUrl, string $token, Store $localStore, ?string $module = null): array
     {
-        $serverStoreId = $localStore->server_id;
-        if (! $serverStoreId) {
+        $runtimeStateService = app(RuntimeStateService::class);
+
+        if (
+            (int) ($runtimeStateService->get()->active_store_id ?? 0) === (int) $localStore->id
+            && ! $runtimeStateService->isStoreBootstrapped((int) $localStore->id)
+        ) {
+            return $this->runBootstrapSync($baseUrl, $token, $localStore);
+        }
+
+        return $this->runDeltaSync($baseUrl, $token, $localStore, $module);
+    }
+
+    public function runBootstrapSync(string $baseUrl, string $token, Store $localStore): array
+    {
+        $serverStoreId = (int) ($localStore->server_id ?? 0);
+        if ($serverStoreId <= 0) {
             return ['ok' => false, 'message' => 'Local store is not linked with cloud store.'];
         }
 
-        $authCheck = Http::baseUrl($baseUrl)
-            ->withToken($token)
-            ->acceptJson()
-            ->get('/api/pos/user');
-
-        if (! $authCheck->successful()) {
+        if (! $this->hasValidCloudToken($baseUrl, $token)) {
             return ['ok' => false, 'message' => 'Cloud token is invalid or expired.'];
         }
 
-        $resources = $this->resolveResourcesForModule($module);
-        if ($module !== null && empty($resources)) {
+        $runtimeStateService = app(RuntimeStateService::class);
+
+        $bootstrapResponse = Http::baseUrl($baseUrl)
+            ->withToken($token)
+            ->acceptJson()
+            ->post("/api/pos/v2/stores/{$serverStoreId}/bootstrap");
+
+        if (! $bootstrapResponse->successful()) {
+            return ['ok' => false, 'message' => (string) ($bootstrapResponse->json('message') ?? $bootstrapResponse->body() ?: 'Unable to prepare store bootstrap.')];
+        }
+
+        $generation = (string) ($bootstrapResponse->json('generation') ?? '');
+        $manifest = (array) ($bootstrapResponse->json('manifest') ?? []);
+        $runtimeStateService->markBootstrapStarted((int) $localStore->id, $generation, 'Downloading store data');
+
+        $downloadResponse = Http::baseUrl($baseUrl)
+            ->withToken($token)
+            ->accept('application/x-ndjson')
+            ->get("/api/pos/v2/stores/{$serverStoreId}/bootstrap/{$generation}/download");
+
+        if (! $downloadResponse->successful()) {
+            $runtimeStateService->markBootstrapFailed((int) $localStore->id, 'Unable to download store data.');
+
+            return ['ok' => false, 'message' => (string) ($downloadResponse->json('message') ?? $downloadResponse->body() ?: 'Unable to download store bootstrap.')];
+        }
+
+        $runtimeStateService->updateBootstrapProgress((int) $localStore->id, 40, 'Store data downloaded');
+
+        $directory = storage_path('app/cloud-sync');
+        if (! is_dir($directory)) {
+            mkdir($directory, 0777, true);
+        }
+
+        $snapshotPath = $directory."/bootstrap-store-{$localStore->id}-{$generation}.ndjson";
+        file_put_contents($snapshotPath, $downloadResponse->body());
+
+        try {
+            $runtimeStateService->markBootstrapInstalling((int) $localStore->id);
+            $installed = $this->installBootstrapSnapshot($snapshotPath, (int) $localStore->id, $manifest);
+            $reconciled = $this->reconcileBootstrapResources($baseUrl, $token, $serverStoreId, (int) $localStore->id, $manifest);
+            $runtimeStateService->markBootstrapReady((int) $localStore->id);
+
+            return [
+                'ok' => true,
+                'mode' => 'bootstrap',
+                'installed' => $installed,
+                'reconciled' => $reconciled,
+            ];
+        } catch (\Throwable $throwable) {
+            $runtimeStateService->markBootstrapFailed((int) $localStore->id, $throwable->getMessage());
+
+            return [
+                'ok' => false,
+                'message' => $throwable->getMessage(),
+            ];
+        } finally {
+            if (is_file($snapshotPath)) {
+                @unlink($snapshotPath);
+            }
+        }
+    }
+
+    public function runDeltaSync(
+        string $baseUrl,
+        string $token,
+        Store $localStore,
+        ?string $module = null,
+        ?string $resource = null,
+    ): array {
+        $serverStoreId = (int) ($localStore->server_id ?? 0);
+        if ($serverStoreId <= 0) {
+            return ['ok' => false, 'message' => 'Local store is not linked with cloud store.'];
+        }
+
+        if (! $this->hasValidCloudToken($baseUrl, $token)) {
+            return ['ok' => false, 'message' => 'Cloud token is invalid or expired.'];
+        }
+
+        $resources = $resource !== null
+            ? [$resource]
+            : ($module !== null ? $this->resolveResourcesForModule($module) : self::PULL_ORDER);
+
+        if ($module !== null && $resources === []) {
             return ['ok' => false, 'message' => 'Invalid sync module selected.'];
         }
 
-        $pushed = $this->pushPendingRows($baseUrl, $token, (int) $serverStoreId, (int) $localStore->id, $resources);
-        $pulled = $this->pullAllResources($baseUrl, $token, (int) $serverStoreId, (int) $localStore->id, $resources);
+        $runtimeStateService = app(RuntimeStateService::class);
+        $runtimeStateService->markDeltaSyncing((int) $localStore->id, 'Pulling cloud updates');
+
+        $storeSyncState = $runtimeStateService->getStoreSyncState((int) $localStore->id);
+        $since = $storeSyncState['last_delta_pull_at'] ?? null;
+
+        $deltaResponse = Http::baseUrl($baseUrl)
+            ->withToken($token)
+            ->acceptJson()
+            ->get("/api/pos/v2/stores/{$serverStoreId}/delta", array_filter([
+                'since' => is_string($since) && $since !== '' ? $since : null,
+                'resource' => $resource,
+            ]));
+
+        if (! $deltaResponse->successful()) {
+            $status = (int) $deltaResponse->status();
+            $message = (string) ($deltaResponse->json('message') ?? $deltaResponse->body() ?: 'Unable to pull delta updates.');
+
+            if (in_array($status, [404, 422], true)) {
+                $pushed = $this->pushPendingRows($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
+                $pulled = $this->pullAllResources($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
+                $runtimeStateService->markDeltaCompleted((int) $localStore->id);
+
+                return [
+                    'ok' => true,
+                    'mode' => 'delta',
+                    'module' => $module,
+                    'resource' => $resource,
+                    'pulled' => $pulled,
+                    'pushed' => $pushed,
+                    'fallback' => 'v1',
+                ];
+            }
+
+            return ['ok' => false, 'message' => $message];
+        }
+
+        $pulled = $this->applyDeltaResources((array) ($deltaResponse->json('data') ?? []), (int) $localStore->id);
+        $runtimeStateService->markDeltaPulled((int) $localStore->id);
+        $pushed = $this->pushPendingRowsV2($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
+        $backfilled = 0;
+
+        if ($module !== null && in_array($module, self::CRITICAL_RECONCILE_MODULES, true)) {
+            $runtimeStateService->updateStoreSyncState((int) $localStore->id, [
+                'bootstrap_progress_label' => 'Backfilling full sales data',
+            ]);
+            $backfilled = $this->pullAllResources($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
+        }
+
+        Http::baseUrl($baseUrl)
+            ->withToken($token)
+            ->acceptJson()
+            ->post("/api/pos/v2/stores/{$serverStoreId}/delta/ack", [
+                'resources' => $resources,
+                'pulled' => $pulled,
+                'pushed' => $pushed,
+            ]);
+
+        $runtimeStateService->markDeltaCompleted((int) $localStore->id);
 
         return [
             'ok' => true,
+            'mode' => 'delta',
             'module' => $module,
-            'pushed' => $pushed,
+            'resource' => $resource,
             'pulled' => $pulled,
+            'pushed' => $pushed,
+            'backfilled' => $backfilled,
         ];
     }
 
@@ -749,6 +927,11 @@ class CloudSyncService
                 }
 
                 ['payload' => $payload, 'has_unresolved_foreign_keys' => $hasUnresolvedForeignKeys] = $this->mapLocalForeignKeysToServerIds($resource, $payload);
+                ['payload' => $payload, 'has_unresolved_foreign_keys' => $hasUnresolvedMorphRelations] = $this->mapLocalMorphRelationsToServerIds($resource, $payload);
+
+                if ($hasUnresolvedMorphRelations) {
+                    $hasUnresolvedForeignKeys = true;
+                }
 
                 if ($hasUnresolvedForeignKeys) {
                     $this->updateLocalRowSyncStatus(
@@ -833,6 +1016,7 @@ class CloudSyncService
     {
         $pulled = 0;
         $resourceList = ! empty($resources) ? $resources : self::PULL_ORDER;
+        $deferredRowsByResource = [];
 
         foreach ($resourceList as $resource) {
             $page = 1;
@@ -852,7 +1036,13 @@ class CloudSyncService
                 }
 
                 $rows = (array) ($response->json('data') ?? []);
-                $this->upsertPulledRows($resource, $rows, $localStoreId);
+                $deferredRows = $this->upsertPulledRows($resource, $rows, $localStoreId);
+                if ($deferredRows !== []) {
+                    $deferredRowsByResource[$resource] = [
+                        ...($deferredRowsByResource[$resource] ?? []),
+                        ...$deferredRows,
+                    ];
+                }
                 $pulled += count($rows);
 
                 $currentPage = (int) ($response->json('meta.current_page') ?? $page);
@@ -860,6 +1050,10 @@ class CloudSyncService
                 $hasMore = $currentPage < $lastPage;
                 $page++;
             }
+        }
+
+        if ($deferredRowsByResource !== []) {
+            $this->retryDeferredPullRows($deferredRowsByResource, $localStoreId);
         }
 
         return $pulled;
@@ -887,6 +1081,7 @@ class CloudSyncService
         $pulled = 0;
         $page = max(1, $startPage);
         $processedPages = 0;
+        $deferredRowsByResource = [];
 
         while ($processedPages < max(1, $maxPages)) {
             $response = Http::baseUrl($baseUrl)
@@ -927,7 +1122,13 @@ class CloudSyncService
             }
 
             $rows = (array) ($response->json('data') ?? []);
-            $this->upsertPulledRows($resource, $rows, $localStoreId);
+            $deferredRows = $this->upsertPulledRows($resource, $rows, $localStoreId);
+            if ($deferredRows !== []) {
+                $deferredRowsByResource[$resource] = [
+                    ...($deferredRowsByResource[$resource] ?? []),
+                    ...$deferredRows,
+                ];
+            }
             $pulled += count($rows);
             $processedPages++;
 
@@ -938,6 +1139,10 @@ class CloudSyncService
                 $page++;
 
                 continue;
+            }
+
+            if ($deferredRowsByResource !== []) {
+                $this->retryDeferredPullRows($deferredRowsByResource, $localStoreId);
             }
 
             $nextResource = $resourceList[$resourceIndex + 1] ?? null;
@@ -958,12 +1163,411 @@ class CloudSyncService
             ];
         }
 
+        if ($deferredRowsByResource !== []) {
+            $this->retryDeferredPullRows($deferredRowsByResource, $localStoreId);
+        }
+
         return [
             'ok' => true,
             'pulled' => $pulled,
             'next_resource' => $resource,
             'next_page' => $page,
         ];
+    }
+
+    private function hasValidCloudToken(string $baseUrl, string $token): bool
+    {
+        $authCheck = Http::baseUrl($baseUrl)
+            ->withToken($token)
+            ->acceptJson()
+            ->get('/api/pos/user');
+
+        return $authCheck->successful();
+    }
+
+    private function installBootstrapSnapshot(string $snapshotPath, int $localStoreId, array $manifest): int
+    {
+        if (! is_file($snapshotPath)) {
+            throw new RuntimeException('Bootstrap snapshot file is missing.');
+        }
+
+        $resourceTotals = collect((array) ($manifest['resources'] ?? []))
+            ->mapWithKeys(fn (array $resource): array => [(string) $resource['resource'] => (int) ($resource['total'] ?? 0)])
+            ->all();
+        $totalRows = max(1, (int) ($manifest['total_rows'] ?? 0));
+        $processedRows = 0;
+        $installed = 0;
+        $runtimeStateService = app(RuntimeStateService::class);
+        $deferredRowsByResource = [];
+
+        $handle = fopen($snapshotPath, 'rb');
+        if ($handle === false) {
+            throw new RuntimeException('Unable to open bootstrap snapshot.');
+        }
+
+        try {
+            while (($line = fgets($handle)) !== false) {
+                $line = trim($line);
+                if ($line === '') {
+                    continue;
+                }
+
+                $payload = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+                $resource = (string) ($payload['resource'] ?? '');
+                $rows = (array) ($payload['rows'] ?? []);
+
+                if ($resource === '') {
+                    continue;
+                }
+
+                $deferredRows = $this->upsertPulledRows($resource, $rows, $localStoreId);
+                $installed += count($rows);
+                $processedRows += count($rows);
+                if ($deferredRows !== []) {
+                    $deferredRowsByResource[$resource] = [
+                        ...($deferredRowsByResource[$resource] ?? []),
+                        ...$deferredRows,
+                    ];
+                }
+
+                $resourceTotal = max(1, (int) ($resourceTotals[$resource] ?? count($rows)));
+                $resourceProcessed = min($resourceTotal, max(0, (int) ($payload['page'] ?? 1) * count($rows)));
+                $progress = 60 + (int) floor(($processedRows / $totalRows) * 40);
+
+                $runtimeStateService->updateBootstrapProgress(
+                    $localStoreId,
+                    min($progress, 99),
+                    "Installing {$resource} ({$processedRows}/{$totalRows})"
+                );
+            }
+        } finally {
+            fclose($handle);
+        }
+
+        if ($deferredRowsByResource !== []) {
+            $this->retryDeferredPullRows($deferredRowsByResource, $localStoreId);
+        }
+
+        return $installed;
+    }
+
+    private function applyDeltaResources(array $resources, int $localStoreId): int
+    {
+        $pulled = 0;
+        $deferredRowsByResource = [];
+
+        foreach ($resources as $resourcePayload) {
+            if (! is_array($resourcePayload)) {
+                continue;
+            }
+
+            $resource = (string) ($resourcePayload['resource'] ?? '');
+            $rows = (array) ($resourcePayload['rows'] ?? []);
+            $tombstones = (array) ($resourcePayload['tombstones'] ?? []);
+
+            if ($resource === '' || ! Schema::hasTable($resource)) {
+                continue;
+            }
+
+            $deferredRows = $this->upsertPulledRows($resource, $rows, $localStoreId);
+            $pulled += count($rows);
+            $this->applyTombstones($resource, $tombstones, $localStoreId);
+            if ($deferredRows !== []) {
+                $deferredRowsByResource[$resource] = [
+                    ...($deferredRowsByResource[$resource] ?? []),
+                    ...$deferredRows,
+                ];
+            }
+        }
+
+        if ($deferredRowsByResource !== []) {
+            $this->retryDeferredPullRows($deferredRowsByResource, $localStoreId);
+        }
+
+        return $pulled;
+    }
+
+    /**
+     * @param  array<string, array<int, array<string, mixed>>>  $deferredRowsByResource
+     */
+    private function retryDeferredPullRows(array $deferredRowsByResource, int $localStoreId): void
+    {
+        $remaining = $deferredRowsByResource;
+
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            $resolvedAny = false;
+
+            foreach (self::PULL_ORDER as $resource) {
+                $rows = $remaining[$resource] ?? [];
+                if ($rows === []) {
+                    continue;
+                }
+
+                $stillDeferred = $this->upsertPulledRows($resource, $rows, $localStoreId);
+                if (count($stillDeferred) < count($rows)) {
+                    $resolvedAny = true;
+                }
+
+                if ($stillDeferred === []) {
+                    unset($remaining[$resource]);
+                } else {
+                    $remaining[$resource] = $stillDeferred;
+                }
+            }
+
+            if ($remaining === [] || ! $resolvedAny) {
+                break;
+            }
+        }
+    }
+
+    private function reconcileBootstrapResources(
+        string $baseUrl,
+        string $token,
+        int $serverStoreId,
+        int $localStoreId,
+        array $manifest,
+    ): int {
+        $resourcesToReconcile = collect((array) ($manifest['resources'] ?? []))
+            ->filter(function (array $resourceMeta) use ($localStoreId): bool {
+                $resource = (string) ($resourceMeta['resource'] ?? '');
+                $expectedTotal = (int) ($resourceMeta['total'] ?? 0);
+
+                if ($resource === '' || $expectedTotal <= 0) {
+                    return false;
+                }
+
+                return $this->countLocalRowsForResource($resource, $localStoreId) < $expectedTotal;
+            })
+            ->pluck('resource')
+            ->values()
+            ->all();
+
+        if ($resourcesToReconcile === []) {
+            return 0;
+        }
+
+        return $this->pullAllResources($baseUrl, $token, $serverStoreId, $localStoreId, $resourcesToReconcile);
+    }
+
+    private function countLocalRowsForResource(string $resource, int $localStoreId): int
+    {
+        if (! Schema::hasTable($resource)) {
+            return 0;
+        }
+
+        return (int) $this->applyStoreScope(DB::table($resource), $resource, $localStoreId)->count();
+    }
+
+    private function applyTombstones(string $resource, array $tombstones, int $localStoreId): void
+    {
+        if (! Schema::hasTable($resource)) {
+            return;
+        }
+
+        foreach ($tombstones as $tombstone) {
+            if (! is_array($tombstone)) {
+                continue;
+            }
+
+            $localRow = $this->findExistingLocalRow($resource, $tombstone, $localStoreId);
+            if ($localRow === null || $this->shouldSkipPulledRow($resource, $localRow, $localStoreId)) {
+                continue;
+            }
+
+            $updates = [];
+            if (Schema::hasColumn($resource, 'deleted_at') && array_key_exists('deleted_at', $tombstone)) {
+                $updates['deleted_at'] = $tombstone['deleted_at'];
+            }
+            if (Schema::hasColumn($resource, 'sync_state')) {
+                $updates['sync_state'] = 'synced';
+            }
+            if (Schema::hasColumn($resource, 'synced_at')) {
+                $updates['synced_at'] = now();
+            }
+            if (Schema::hasColumn($resource, 'sync_error')) {
+                $updates['sync_error'] = null;
+            }
+
+            if ($updates !== []) {
+                DB::table($resource)->where('id', (int) $localRow->id)->update($updates);
+            }
+        }
+    }
+
+    private function pushPendingRowsV2(string $baseUrl, string $token, int $serverStoreId, int $localStoreId, array $resources = []): int
+    {
+        $resourceList = $resources !== [] ? $resources : self::PULL_ORDER;
+        $payloadResources = [];
+        $trackedRows = [];
+
+        foreach ($resourceList as $resource) {
+            if (! Schema::hasTable($resource) || ! Schema::hasColumn($resource, 'sync_state')) {
+                continue;
+            }
+
+            $rows = $this->applyStoreScope(DB::table($resource), $resource, $localStoreId)
+                ->whereIn('sync_state', ['pending', 'failed'])
+                ->tap(fn (Builder $query) => $this->applyDefaultOrder($query, $resource))
+                ->limit(200)
+                ->get();
+
+            if ($rows->isEmpty()) {
+                continue;
+            }
+
+            $payloadRows = [];
+            $rowsForResponse = [];
+
+            foreach ($rows as $row) {
+                $payload = (array) $row;
+
+                if (Schema::hasColumn($resource, 'local_id') && trim((string) ($payload['local_id'] ?? '')) === '') {
+                    $storeId = $this->resolveStoreIdForPayload($resource, $payload, $localStoreId);
+                    $localId = app(LocalIdentifierService::class)->makeForTable($resource, $storeId > 0 ? $storeId : null);
+                    $this->updateLocalRowSyncStatus($resource, $row, ['local_id' => $localId]);
+                    $payload['local_id'] = $localId;
+                }
+
+                ['payload' => $payload, 'has_unresolved_foreign_keys' => $hasUnresolvedForeignKeys] = $this->mapLocalForeignKeysToServerIds($resource, $payload);
+                ['payload' => $payload, 'has_unresolved_foreign_keys' => $hasUnresolvedMorphRelations] = $this->mapLocalMorphRelationsToServerIds($resource, $payload);
+
+                if ($hasUnresolvedMorphRelations) {
+                    $hasUnresolvedForeignKeys = true;
+                }
+
+                if ($hasUnresolvedForeignKeys) {
+                    $this->updateLocalRowSyncStatus($resource, $row, [
+                        'sync_state' => 'failed',
+                        'sync_error' => 'Dependent records are not synced to cloud yet.',
+                    ]);
+
+                    continue;
+                }
+
+                unset($payload['id'], $payload['sync_state'], $payload['synced_at'], $payload['sync_error']);
+                $payloadRows[] = $payload;
+                $rowsForResponse[] = $row;
+            }
+
+            if ($payloadRows === []) {
+                continue;
+            }
+
+            $payloadResources[] = [
+                'resource' => $resource,
+                'rows' => $payloadRows,
+            ];
+            $trackedRows[$resource] = array_values($rowsForResponse);
+        }
+
+        if ($payloadResources === []) {
+            return 0;
+        }
+
+        $response = Http::baseUrl($baseUrl)
+            ->withToken($token)
+            ->acceptJson()
+            ->post("/api/pos/v2/stores/{$serverStoreId}/delta/upsert", [
+                'resources' => $payloadResources,
+            ]);
+
+        if (! $response->successful()) {
+            $error = (string) ($response->json('message') ?? $response->body() ?: 'Unable to push local changes.');
+
+            foreach ($trackedRows as $resource => $rowsForResponse) {
+                foreach ($rowsForResponse as $row) {
+                    $this->updateLocalRowSyncStatus($resource, $row, [
+                        'sync_state' => 'failed',
+                        'sync_error' => $error,
+                    ]);
+                }
+            }
+
+            return 0;
+        }
+
+        $pushedCount = 0;
+        $resourceResults = collect((array) $response->json('resources', []))
+            ->mapWithKeys(fn (array $resourceResult): array => [(string) ($resourceResult['resource'] ?? '') => (array) ($resourceResult['results'] ?? [])]);
+
+        foreach ($trackedRows as $resource => $rowsForResponse) {
+            $results = collect($resourceResults[$resource] ?? []);
+
+            foreach (array_values($rowsForResponse) as $index => $row) {
+                $result = $results->firstWhere('index', $index);
+                $status = (string) ($result['status'] ?? 'synced');
+                $error = (string) ($result['error'] ?? '');
+
+                if ($status === 'synced') {
+                    $this->updateLocalRowSyncStatus($resource, $row, [
+                        'sync_state' => 'synced',
+                        'synced_at' => now(),
+                        'sync_error' => null,
+                    ]);
+                    $pushedCount++;
+                } else {
+                    $this->updateLocalRowSyncStatus($resource, $row, [
+                        'sync_state' => 'failed',
+                        'sync_error' => $error !== '' ? $error : 'Row sync failed.',
+                    ]);
+                }
+            }
+        }
+
+        return $pushedCount;
+    }
+
+    private function findExistingLocalRow(string $table, array $payload, int $localStoreId): ?object
+    {
+        if (! Schema::hasTable($table)) {
+            return null;
+        }
+
+        if (Schema::hasColumn($table, 'server_id') && is_numeric($payload['server_id'] ?? null)) {
+            $query = DB::table($table)->where('server_id', (int) $payload['server_id']);
+
+            if (Schema::hasColumn($table, 'store_id') && $table !== 'stores') {
+                $query->where('store_id', $localStoreId);
+            }
+
+            return $query->first();
+        }
+
+        if (Schema::hasColumn($table, 'local_id') && filled($payload['local_id'] ?? null)) {
+            $query = DB::table($table)->where('local_id', (string) $payload['local_id']);
+
+            if (Schema::hasColumn($table, 'store_id') && $table !== 'stores') {
+                $query->where('store_id', $localStoreId);
+            }
+
+            return $query->first();
+        }
+
+        $compositeLookup = $this->resolveCompositeLookupForPulledRow($table, $payload);
+        if ($compositeLookup !== []) {
+            return DB::table($table)->where($compositeLookup)->first();
+        }
+
+        return null;
+    }
+
+    private function shouldSkipPulledRow(string $table, object $localRow, int $localStoreId): bool
+    {
+        if (property_exists($localRow, 'sync_state') && in_array((string) ($localRow->sync_state ?? ''), ['pending', 'failed'], true)) {
+            return true;
+        }
+
+        $localId = (int) ($localRow->id ?? 0);
+        if ($localId <= 0) {
+            return false;
+        }
+
+        return SyncOutbox::query()
+            ->where('entity_type', $table)
+            ->where('local_id', $localId)
+            ->whereIn('status', ['pending', 'failed'])
+            ->exists();
     }
 
     /**
@@ -1086,13 +1690,18 @@ class CloudSyncService
         return false;
     }
 
-    private function upsertPulledRows(string $table, array $rows, int $localStoreId): void
+    /**
+     * @param  array<int, array<string, mixed>>  $rows
+     * @return array<int, array<string, mixed>>
+     */
+    private function upsertPulledRows(string $table, array $rows, int $localStoreId): array
     {
         if (! Schema::hasTable($table) || empty($rows)) {
-            return;
+            return [];
         }
 
         $columns = collect(Schema::getColumnListing($table));
+        $deferredRows = [];
 
         foreach ($rows as $row) {
             if (! is_array($row)) {
@@ -1134,7 +1743,15 @@ class CloudSyncService
             }
 
             ['payload' => $normalized, 'has_unresolved_foreign_keys' => $hasUnresolvedForeignKeys] = $this->mapForeignKeysToLocalIds($table, $normalized, $localStoreId);
+            ['payload' => $normalized, 'has_unresolved_foreign_keys' => $hasUnresolvedMorphRelations] = $this->mapMorphRelationsToLocalIds($table, $normalized, $localStoreId);
+
+            if ($hasUnresolvedMorphRelations) {
+                $hasUnresolvedForeignKeys = true;
+            }
+
             if ($hasUnresolvedForeignKeys) {
+                $deferredRows[] = $row;
+
                 continue;
             }
 
@@ -1142,6 +1759,11 @@ class CloudSyncService
             $normalized = collect($normalized)
                 ->filter(fn ($_, string $key): bool => $columns->contains($key))
                 ->all();
+
+            $existingLocalRow = $this->findExistingLocalRow($table, $normalized, $localStoreId);
+            if ($existingLocalRow !== null && $this->shouldSkipPulledRow($table, $existingLocalRow, $localStoreId)) {
+                continue;
+            }
 
             $compositeLookup = $this->resolveCompositeLookupForPulledRow($table, $normalized);
 
@@ -1278,6 +1900,8 @@ class CloudSyncService
                 DB::table($table)->updateOrInsert($compositeLookup, $normalized);
             }
         }
+
+        return $deferredRows;
     }
 
     private function mapForeignKeysToLocalIds(string $table, array $payload, int $localStoreId): array
@@ -1332,6 +1956,63 @@ class CloudSyncService
                 } else {
                     $hasUnresolvedForeignKeys = true;
                 }
+            }
+        }
+
+        return [
+            'payload' => $payload,
+            'has_unresolved_foreign_keys' => $hasUnresolvedForeignKeys,
+        ];
+    }
+
+    private function mapMorphRelationsToLocalIds(string $table, array $payload, int $localStoreId): array
+    {
+        $hasUnresolvedForeignKeys = false;
+
+        foreach (['transactionable', 'referenceable', 'payable', 'imageable', 'activityable'] as $prefix) {
+            $typeColumn = "{$prefix}_type";
+            $idColumn = "{$prefix}_id";
+
+            $type = trim((string) ($payload[$typeColumn] ?? ''));
+            $remoteId = $payload[$idColumn] ?? null;
+
+            if ($type === '' || ! is_numeric($remoteId)) {
+                continue;
+            }
+
+            $morphDefinition = self::MORPH_TYPE_MAP[$type] ?? null;
+            if (! is_array($morphDefinition)) {
+                continue;
+            }
+
+            $relatedTable = (string) ($morphDefinition['table'] ?? '');
+            $canonicalClass = (string) ($morphDefinition['class'] ?? $type);
+
+            if ($relatedTable === '' || ! Schema::hasTable($relatedTable) || ! Schema::hasColumn($relatedTable, 'server_id')) {
+                if ($this->isNullableColumn($table, $idColumn)) {
+                    $payload[$idColumn] = null;
+                    $payload[$typeColumn] = $canonicalClass;
+                } else {
+                    $hasUnresolvedForeignKeys = true;
+                }
+
+                continue;
+            }
+
+            $query = DB::table($relatedTable)->where('server_id', (int) $remoteId);
+            if (Schema::hasColumn($relatedTable, 'store_id') && $relatedTable !== 'stores') {
+                $query->where('store_id', $localStoreId);
+            }
+
+            $localId = $query->value('id');
+            if (is_numeric($localId)) {
+                $payload[$idColumn] = (int) $localId;
+                $payload[$typeColumn] = $canonicalClass;
+            } elseif ($this->isNullableColumn($table, $idColumn)) {
+                $payload[$idColumn] = null;
+                $payload[$typeColumn] = $canonicalClass;
+            } else {
+                $hasUnresolvedForeignKeys = true;
             }
         }
 
@@ -1484,6 +2165,61 @@ class CloudSyncService
                 } else {
                     $hasUnresolvedForeignKeys = true;
                 }
+            }
+        }
+
+        return [
+            'payload' => $payload,
+            'has_unresolved_foreign_keys' => $hasUnresolvedForeignKeys,
+        ];
+    }
+
+    private function mapLocalMorphRelationsToServerIds(string $table, array $payload): array
+    {
+        $hasUnresolvedForeignKeys = false;
+
+        foreach (['transactionable', 'referenceable', 'payable', 'imageable', 'activityable'] as $prefix) {
+            $typeColumn = "{$prefix}_type";
+            $idColumn = "{$prefix}_id";
+
+            $type = trim((string) ($payload[$typeColumn] ?? ''));
+            $localId = $payload[$idColumn] ?? null;
+
+            if ($type === '' || ! is_numeric($localId)) {
+                continue;
+            }
+
+            $morphDefinition = self::MORPH_TYPE_MAP[$type] ?? null;
+            if (! is_array($morphDefinition)) {
+                continue;
+            }
+
+            $relatedTable = (string) ($morphDefinition['table'] ?? '');
+            $canonicalClass = (string) ($morphDefinition['class'] ?? $type);
+
+            if ($relatedTable === '' || ! Schema::hasTable($relatedTable) || ! Schema::hasColumn($relatedTable, 'server_id')) {
+                if ($this->isNullableColumn($table, $idColumn)) {
+                    $payload[$idColumn] = null;
+                    $payload[$typeColumn] = $canonicalClass;
+                } else {
+                    $hasUnresolvedForeignKeys = true;
+                }
+
+                continue;
+            }
+
+            $serverId = DB::table($relatedTable)
+                ->where('id', (int) $localId)
+                ->value('server_id');
+
+            if (is_numeric($serverId)) {
+                $payload[$idColumn] = (int) $serverId;
+                $payload[$typeColumn] = $canonicalClass;
+            } elseif ($this->isNullableColumn($table, $idColumn)) {
+                $payload[$idColumn] = null;
+                $payload[$typeColumn] = $canonicalClass;
+            } else {
+                $hasUnresolvedForeignKeys = true;
             }
         }
 

@@ -16,6 +16,7 @@ use SmartTill\Core\Models\SaleVariation;
 use SmartTill\Core\Models\Stock;
 use SmartTill\Core\Models\StoreSetting;
 use SmartTill\Core\Models\Transaction;
+use SmartTill\Core\Models\UnitDimension;
 use SmartTill\Core\Models\Variation;
 
 class DispatchCloudSyncObserver
@@ -57,12 +58,12 @@ class DispatchCloudSyncObserver
             return;
         }
 
-        $module = $this->resolveModule($model);
-        if ($module === null) {
+        $resource = $this->resolveResource($model);
+        if ($resource === null) {
             return;
         }
 
-        SyncCloudStoreData::dispatch($storeId, $module);
+        SyncCloudStoreData::dispatch($storeId, 'delta', null, $resource);
     }
 
     private function ensureServerManagedReference(Model $model): void
@@ -134,27 +135,27 @@ class DispatchCloudSyncObserver
         return 0;
     }
 
-    private function resolveModule(Model $model): ?string
+    private function resolveResource(Model $model): ?string
     {
         return match (true) {
             $model instanceof StoreSetting => null,
-            $model->getTable() === 'sales',
-            $model instanceof SaleVariation,
-            $model instanceof SalePreparableItem => 'sales',
+            $model->getTable() === 'sales' => 'sales',
+            $model instanceof SaleVariation => 'sale_variation',
+            $model instanceof SalePreparableItem => 'sale_preparable_items',
             $model->getTable() === 'customers' => 'customers',
-            $model->getTable() === 'payments',
-            $model instanceof Transaction => 'payments',
-            $model->getTable() === 'products',
-            $model instanceof ProductAttribute,
-            $model instanceof Variation,
-            $model instanceof Stock => 'products',
+            $model->getTable() === 'payments' => 'payments',
+            $model instanceof Transaction => 'transactions',
+            $model->getTable() === 'products' => 'products',
+            $model instanceof ProductAttribute => 'product_attributes',
+            $model instanceof Variation => 'variations',
+            $model instanceof Stock => 'stocks',
             $model->getTable() === 'brands' => 'brands',
             $model->getTable() === 'categories' => 'categories',
             $model->getTable() === 'attributes' => 'attributes',
-            $model->getTable() === 'units',
-            $model instanceof \SmartTill\Core\Models\UnitDimension => 'units',
-            $model->getTable() === 'purchase_orders',
-            $model instanceof PurchaseOrderProduct => 'purchase_orders',
+            $model->getTable() === 'units' => 'units',
+            $model instanceof UnitDimension => 'unit_dimensions',
+            $model->getTable() === 'purchase_orders' => 'purchase_orders',
+            $model instanceof PurchaseOrderProduct => 'purchase_order_products',
             $model->getTable() === 'suppliers' => 'suppliers',
             default => null,
         };

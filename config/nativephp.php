@@ -1,5 +1,7 @@
 <?php
 
+use App\Providers\NativeAppServiceProvider;
+
 return [
     /**
      * The version of your app.
@@ -51,7 +53,7 @@ return [
      * takes care of bootstrapping your application and configuring
      * any global hotkeys, menus, windows, etc.
      */
-    'provider' => \App\Providers\NativeAppServiceProvider::class,
+    'provider' => NativeAppServiceProvider::class,
 
     /**
      * A list of environment keys that should be removed from the
@@ -153,8 +155,8 @@ return [
     'queue_workers' => [
         'default' => [
             'queues' => ['default'],
-            'memory_limit' => 128,
-            'timeout' => 60,
+            'memory_limit' => 512,
+            'timeout' => 1800,
             'sleep' => 3,
         ],
     ],

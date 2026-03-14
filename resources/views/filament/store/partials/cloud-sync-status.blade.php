@@ -57,11 +57,15 @@
     }
 
     $hasSyncError = (bool) ($syncErrorOverview['has_sync_errors'] ?? false) || $outboxFailedCount > 0 || $hasSyncQueueFailures;
-    $isSyncing = ! $hasSyncError && $hasSyncQueueActivity;
+    $bootstrapStatus = (string) ($runtimeState->bootstrap_status ?? 'not_started');
+    $bootstrapProgressPercent = (int) ($runtimeState->bootstrap_progress_percent ?? 0);
+    $bootstrapProgressLabel = (string) ($runtimeState->bootstrap_progress_label ?? '');
+    $isBootstrapping = in_array($bootstrapStatus, ['downloading', 'installing'], true);
+    $isSyncing = ! $hasSyncError && $hasSyncQueueActivity && ! $isBootstrapping;
 
     $iconColorClass = 'text-red-600';
     if ($isCloudConnected) {
-        $iconColorClass = $hasSyncError ? 'text-red-600' : ($isSyncing ? 'text-amber-500' : 'text-emerald-600');
+        $iconColorClass = $hasSyncError ? 'text-red-600' : (($isSyncing || $isBootstrapping) ? 'text-amber-500' : 'text-emerald-600');
     }
 
     $moduleDefinitions = $cloudSyncService->getSyncModules();
@@ -74,6 +78,10 @@
         isSyncSubmitting: false,
         syncingModules: {},
         isQueueSyncing: @js($isSyncing),
+        isBootstrapping: @js($isBootstrapping),
+        bootstrapStatus: @js($bootstrapStatus),
+        bootstrapProgressPercent: @js($bootstrapProgressPercent),
+        bootstrapProgressLabel: @js($bootstrapProgressLabel),
         hasRuntimeErrors: @js($hasSyncError),
         moduleQueueSyncing: @js(collect(array_keys($moduleDefinitions))->mapWithKeys(fn (string $key): array => [$key => false])->all()),
         pollTimer: null,
@@ -82,6 +90,9 @@
         dismissedErrors: false,
         lastMessage: '',
         lastMessageType: 'success',
+        bootstrapHeadline() {
+            return this.bootstrapStatus === 'installing' ? 'Installing store data' : 'Downloading store data';
+        },
         setMessage(message, type = 'success', autoHideMs = 0) {
             this.lastMessage = message;
             this.lastMessageType = type;
@@ -119,6 +130,10 @@
 
                 const data = await response.json().catch(() => ({}));
                 this.isQueueSyncing = !!data?.is_syncing;
+                this.isBootstrapping = !!data?.is_bootstrapping;
+                this.bootstrapStatus = data?.bootstrap_status ?? 'not_started';
+                this.bootstrapProgressPercent = Number(data?.bootstrap_progress_percent ?? 0);
+                this.bootstrapProgressLabel = data?.bootstrap_progress_label ?? '';
                 this.hasRuntimeErrors = !!data?.has_errors;
 
                 const incoming = data?.module_syncing ?? {};
@@ -126,7 +141,7 @@
                     this.moduleQueueSyncing[key] = !!incoming[key];
                 });
 
-                if (this.wasQueueSyncing && !this.isQueueSyncing) {
+                if (this.wasQueueSyncing && !this.isQueueSyncing && !this.isBootstrapping) {
                     if (this.hasRuntimeErrors) {
                         this.setMessage('Sync completed with errors. Please review error records.', 'error');
                     } else {
@@ -177,7 +192,7 @@
             await this.pollSyncStatus();
         },
         async syncNow() {
-            if (this.isSyncSubmitting || this.isQueueSyncing) {
+            if (this.isSyncSubmitting || this.isQueueSyncing || this.isBootstrapping) {
                 return;
             }
 
@@ -194,7 +209,7 @@
             }
         },
         async syncModule(moduleKey) {
-            if (this.syncingModules[moduleKey] || this.isQueueSyncing || this.moduleQueueSyncing[moduleKey]) {
+            if (this.syncingModules[moduleKey] || this.isQueueSyncing || this.isBootstrapping || this.moduleQueueSyncing[moduleKey]) {
                 return;
             }
 
@@ -280,14 +295,28 @@
                     @if ($isCloudConnected)
                         <p
                             class="mt-1 text-xs font-medium"
-                            :class="hasRuntimeErrors ? 'text-red-600' : (isQueueSyncing ? 'text-amber-600' : 'text-emerald-600')"
-                            x-text="hasRuntimeErrors ? 'Sync has errors' : (isQueueSyncing ? 'Sync in progress' : 'All synced')"
+                            :class="hasRuntimeErrors ? 'text-red-600' : ((isQueueSyncing || isBootstrapping) ? 'text-amber-600' : 'text-emerald-600')"
+                            x-text="hasRuntimeErrors ? 'Sync has errors' : (isBootstrapping ? bootstrapHeadline() : (isQueueSyncing ? 'Sync in progress' : 'All synced'))"
                         ></p>
+                        <div x-show="isBootstrapping" class="mt-3">
+                            <div class="flex items-center justify-between text-xs text-slate-500 dark:text-gray-400">
+                                <span x-text="bootstrapProgressLabel || 'Preparing bootstrap'"></span>
+                                <span x-text="`${bootstrapProgressPercent}%`"></span>
+                            </div>
+                            <div class="mt-2 h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-gray-800">
+                                <div class="h-full rounded-full bg-amber-500 transition-all duration-300" :style="`width: ${bootstrapProgressPercent}%`"></div>
+                            </div>
+                            <p class="mt-3 text-xs text-slate-500 dark:text-gray-400">
+                                Large first-time imports can take several minutes. The POS opens normally after installation finishes.
+                            </p>
+                        </div>
                     @endif
-                    <p class="mt-2 text-xs text-slate-500 dark:text-gray-400">
+                    <p class="mt-2 text-xs text-slate-500 dark:text-gray-400" x-show="!isBootstrapping">
                         {{ $runtimeState->last_synced_at ? 'Last synced: '.$runtimeState->last_synced_at->diffForHumans() : 'Last synced: never' }}
                     </p>
-                    <p class="mt-2 text-xs text-slate-500 dark:text-gray-400">Store switch sync runs in background jobs.</p>
+                    <p class="mt-2 text-xs text-slate-500 dark:text-gray-400" x-show="isBootstrapping">
+                        The POS is blocked until this first store install finishes.
+                    </p>
                 </div>
 
                 <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
@@ -324,11 +353,11 @@
                                             <button
                                                 type="button"
                                                 class="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
-                                                :disabled="isSyncSubmitting || isQueueSyncing || !!syncingModules[@js($moduleKey)] || !!moduleQueueSyncing[@js($moduleKey)]"
+                                                :disabled="isSyncSubmitting || isQueueSyncing || isBootstrapping || !!syncingModules[@js($moduleKey)] || !!moduleQueueSyncing[@js($moduleKey)]"
                                                 @click="syncModule(@js($moduleKey))"
                                             >
                                                 <svg
-                                                    x-show="!!syncingModules[@js($moduleKey)] || !!moduleQueueSyncing[@js($moduleKey)] || isQueueSyncing"
+                                                    x-show="!!syncingModules[@js($moduleKey)] || !!moduleQueueSyncing[@js($moduleKey)] || isQueueSyncing || isBootstrapping"
                                                     xmlns="http://www.w3.org/2000/svg"
                                                     class="h-3 w-3 animate-spin"
                                                     viewBox="0 0 24 24"
@@ -339,7 +368,7 @@
                                                 >
                                                     <path d="M12 2v4m0 12v4m10-10h-4M6 12H2m16.95 6.95-2.83-2.83M7.88 7.88 5.05 5.05m13.9 0-2.83 2.83M7.88 16.12l-2.83 2.83"/>
                                                 </svg>
-                                                <span x-text="(syncingModules[@js($moduleKey)] || moduleQueueSyncing[@js($moduleKey)] || isQueueSyncing) ? 'Syncing...' : 'Sync'"></span>
+                                                <span x-text="(syncingModules[@js($moduleKey)] || moduleQueueSyncing[@js($moduleKey)] || isQueueSyncing || isBootstrapping) ? 'Syncing...' : 'Sync'"></span>
                                             </button>
                                         </div>
                                     </div>
@@ -435,11 +464,11 @@
                         <button
                             type="button"
                             class="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-70"
-                            :disabled="isSyncSubmitting || isQueueSyncing"
+                            :disabled="isSyncSubmitting || isQueueSyncing || isBootstrapping"
                             @click="syncNow"
                         >
                             <svg
-                                x-show="isSyncSubmitting || isQueueSyncing"
+                                x-show="isSyncSubmitting || isQueueSyncing || isBootstrapping"
                                 xmlns="http://www.w3.org/2000/svg"
                                 class="h-4 w-4 animate-spin"
                                 viewBox="0 0 24 24"
@@ -450,7 +479,7 @@
                             >
                                 <path d="M12 2v4m0 12v4m10-10h-4M6 12H2m16.95 6.95-2.83-2.83M7.88 7.88 5.05 5.05m13.9 0-2.83 2.83M7.88 16.12l-2.83 2.83"/>
                             </svg>
-                            <span x-text="(isSyncSubmitting || isQueueSyncing) ? 'Syncing...' : 'Sync Now'"></span>
+                            <span x-text="isBootstrapping ? bootstrapHeadline() : ((isSyncSubmitting || isQueueSyncing) ? 'Syncing...' : 'Sync Now')"></span>
                         </button>
                     @else
                         <a href="{{ route('startup.cloud.form') }}" class="block w-full rounded-lg bg-blue-600 px-4 py-2 text-center text-sm font-medium text-white hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-400">

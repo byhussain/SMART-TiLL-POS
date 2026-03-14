@@ -19,6 +19,9 @@ Route::post('/startup/cloud/login', [StartupController::class, 'cloudLogin'])->n
 Route::post('/startup/cloud/register', [StartupController::class, 'cloudRegister'])->name('startup.cloud.register');
 Route::get('/startup/cloud/stores', [StartupController::class, 'cloudStores'])->name('startup.cloud.stores');
 Route::post('/startup/cloud/select-store', [StartupController::class, 'selectCloudStore'])->name('startup.cloud.select-store');
+Route::get('/startup/cloud/bootstrap/{store}', [StartupController::class, 'cloudBootstrap'])
+    ->whereNumber('store')
+    ->name('startup.cloud.bootstrap');
 Route::post('/startup/cloud/disconnect', [StartupController::class, 'disconnectCloud'])->name('startup.cloud.disconnect');
 Route::post('/startup/cloud/sync-now', [StartupController::class, 'syncNow'])->name('startup.cloud.sync-now');
 Route::post('/startup/cloud/sync-module', [StartupController::class, 'syncModule'])->name('startup.cloud.sync-module');

@@ -24,11 +24,13 @@ it('records a failed sync_outbox row when background sync returns not ok', funct
     $state->cloud_base_url = 'https://cloud.example.test';
     $state->active_store_id = $store->id;
 
-    $runtimeStateService = \Mockery::mock(RuntimeStateService::class);
+    $runtimeStateService = Mockery::mock(RuntimeStateService::class);
     $runtimeStateService->shouldReceive('get')->once()->andReturn($state);
+    $runtimeStateService->shouldReceive('isStoreBootstrapped')->once()->with($store->id)->andReturn(false);
+    $runtimeStateService->shouldReceive('markBootstrapFailed')->once()->with($store->id, 'Unable to sync store.');
 
-    $mock = \Mockery::mock(CloudSyncService::class);
-    $mock->shouldReceive('syncNow')
+    $mock = Mockery::mock(CloudSyncService::class);
+    $mock->shouldReceive('runBootstrapSync')
         ->once()
         ->andReturn([
             'ok' => false,
@@ -42,7 +44,7 @@ it('records a failed sync_outbox row when background sync returns not ok', funct
     $this->assertDatabaseHas('sync_outbox', [
         'entity_type' => 'cloud_store_sync',
         'local_id' => $store->id,
-        'operation' => 'pull',
+        'operation' => 'bootstrap',
         'status' => 'failed',
         'error' => 'Unable to sync store.',
     ]);
@@ -56,6 +58,8 @@ it('uses long-running queue settings and overlap lock for the same store', funct
     expect($job->tries)->toBe(3);
     expect($job->timeout)->toBe(1200);
     expect($job->backoff)->toBe(30);
+    expect(config('nativephp.queue_workers.default.timeout'))->toBeGreaterThanOrEqual($job->timeout);
+    expect(config('nativephp.queue_workers.default.memory_limit'))->toBe(512);
 
     $middleware = $job->middleware();
     expect($middleware)->toHaveCount(1);

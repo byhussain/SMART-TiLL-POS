@@ -1,25 +1,23 @@
 <?php
 
-it('uses chunk cursor in cloud sync job for large first syncs', function (): void {
+it('uses bootstrap and delta orchestration in cloud sync job', function (): void {
     $contents = file_get_contents(app_path('Jobs/SyncCloudStoreData.php'));
 
     expect($contents)
-        ->toContain('public ?string $resource = null;')
-        ->toContain('public int $page = 1;')
-        ->toContain('foreach ($cloudSyncService->getSyncModuleKeys() as $moduleKey)')
-        ->toContain('self::dispatch($this->storeId, (string) $moduleKey);')
-        ->toContain('->syncChunk(')
-        ->toContain('self::dispatch($this->storeId, $this->module, $nextResource, $nextPage);');
+        ->toContain('public string $action;')
+        ->toContain('public ?string $resource;')
+        ->toContain("\$action = \$runtimeStateService->isStoreBootstrapped(\$this->storeId) ? 'delta' : 'bootstrap';")
+        ->toContain('->runBootstrapSync(')
+        ->toContain('->runDeltaSync(');
 });
 
-it('processes cloud pulls in fixed page chunks and returns continuation cursor', function (): void {
+it('supports bootstrap staging and delta endpoints in cloud sync service', function (): void {
     $contents = file_get_contents(app_path('Services/CloudSyncService.php'));
 
     expect($contents)
-        ->toContain('private const MAX_PAGES_PER_CHUNK = 3;')
-        ->toContain('public function getSyncModuleKeys(): array')
-        ->toContain('private function pullResourceChunk(')
-        ->toContain("str_contains(strtolower(\$message), 'unsupported resource')")
-        ->toContain("'next_resource'")
-        ->toContain("'next_page'");
+        ->toContain('public function runBootstrapSync(')
+        ->toContain('public function runDeltaSync(')
+        ->toContain('private function installBootstrapSnapshot(')
+        ->toContain('private function pushPendingRowsV2(')
+        ->toContain('/api/pos/v2/stores/');
 });

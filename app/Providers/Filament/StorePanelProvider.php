@@ -8,6 +8,7 @@ use App\Filament\Widgets\SaleStatsWidget;
 use App\Filament\Widgets\StockLevelsAlerts;
 use App\Filament\Widgets\SupplierStatsWidget;
 use App\Http\Middleware\EnsurePosSystemUserAuthenticated;
+use App\Http\Middleware\EnsureStoreBootstrapReady;
 use App\Http\Middleware\SyncCloudStoreOnTenantSwitch;
 use App\Models\Store;
 use Filament\Http\Middleware\Authenticate;
@@ -19,6 +20,7 @@ use Filament\Panel;
 use Filament\PanelProvider;
 use Filament\Support\Colors\Color;
 use Filament\View\PanelsRenderHook;
+use Illuminate\Contracts\View\View;
 use Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse;
 use Illuminate\Cookie\Middleware\EncryptCookies;
 use Illuminate\Foundation\Http\Middleware\VerifyCsrfToken;
@@ -78,6 +80,7 @@ class StorePanelProvider extends PanelProvider
                 StartSession::class,
                 EnsurePosSystemUserAuthenticated::class,
                 SyncCloudStoreOnTenantSwitch::class,
+                EnsureStoreBootstrapReady::class,
                 AuthenticateSession::class,
                 ShareErrorsFromSession::class,
                 VerifyCsrfToken::class,
@@ -96,7 +99,7 @@ class StorePanelProvider extends PanelProvider
             ->spa()
             ->renderHook(
                 PanelsRenderHook::GLOBAL_SEARCH_BEFORE,
-                fn (): \Illuminate\Contracts\View\View => view('filament.store.partials.cloud-sync-status'),
+                fn (): View => view('filament.store.partials.cloud-sync-status'),
             );
     }
 }

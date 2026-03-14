@@ -17,6 +17,13 @@ class AppRuntimeState extends Model
         'cloud_token',
         'cloud_base_url',
         'last_synced_at',
+        'bootstrap_status',
+        'bootstrap_progress_percent',
+        'bootstrap_progress_label',
+        'bootstrap_generation',
+        'last_delta_pull_at',
+        'last_delta_push_at',
+        'store_sync_states',
     ];
 
     protected function casts(): array
@@ -25,6 +32,9 @@ class AppRuntimeState extends Model
             'has_completed_onboarding' => 'boolean',
             'cloud_token_present' => 'boolean',
             'last_synced_at' => 'datetime',
+            'last_delta_pull_at' => 'datetime',
+            'last_delta_push_at' => 'datetime',
+            'store_sync_states' => 'array',
         ];
     }
 }

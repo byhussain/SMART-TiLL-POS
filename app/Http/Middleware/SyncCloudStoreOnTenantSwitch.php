@@ -42,7 +42,8 @@ class SyncCloudStoreOnTenantSwitch
             && $lastDispatchedTenantId !== (int) $store->id;
 
         if ($shouldSync) {
-            SyncCloudStoreData::dispatch((int) $store->id);
+            $action = $this->runtimeStateService->isStoreBootstrapped((int) $store->id) ? 'delta' : 'bootstrap';
+            SyncCloudStoreData::dispatch((int) $store->id, $action);
 
             if ($request->hasSession()) {
                 $request->session()->put('pos_last_sync_dispatched_tenant_id', (int) $store->id);

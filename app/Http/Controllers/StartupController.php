@@ -12,7 +12,9 @@ use Filament\Notifications\Notification;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 use Illuminate\View\View;
 use RuntimeException;
@@ -42,6 +44,14 @@ class StartupController extends Controller
                 $state->has_completed_onboarding = false;
                 $state->save();
             } else {
+                if (
+                    $state->mode === 'cloud'
+                    && (int) ($store->server_id ?? 0) > 0
+                    && ! $this->runtimeStateService->isStoreBootstrapped((int) $store->id)
+                ) {
+                    return to_route('startup.cloud.bootstrap', ['store' => $store->id]);
+                }
+
                 return to_route('filament.store.pages.dashboard', ['tenant' => $store->id]);
             }
         }
@@ -351,13 +361,43 @@ class StartupController extends Controller
         $systemUser = $this->systemUserService->ensureAuthenticated();
         $this->systemUserService->ensureStoresAttached($systemUser, $localStores);
         $this->runtimeStateService->completeCloudOnboarding($localStore, $cloudUserId, $token, $baseUrl);
-        SyncCloudStoreData::dispatch((int) $localStore->id);
+        SyncCloudStoreData::dispatch((int) $localStore->id, 'bootstrap');
 
-        $redirect = route('filament.store.pages.dashboard', ['tenant' => $localStore->id]);
+        $redirect = route('startup.cloud.bootstrap', ['store' => $localStore->id]);
 
         return response()->json([
-            'message' => 'Cloud store connected successfully. Initial sync started in background.',
+            'message' => 'Cloud store connected successfully. Store data download has started.',
             'redirect' => $redirect,
+        ]);
+    }
+
+    public function cloudBootstrap(Store $store): View|RedirectResponse
+    {
+        $state = $this->runtimeStateService->get();
+
+        if (
+            $state->mode !== 'cloud'
+            || ! $state->cloud_token_present
+            || ! filled($state->cloud_base_url)
+            || ! filled($state->cloud_token)
+            || (int) ($store->server_id ?? 0) <= 0
+        ) {
+            return to_route('startup.cloud.form');
+        }
+
+        $this->systemUserService->ensureAuthenticated();
+        $this->runtimeStateService->setActiveStore($store);
+
+        if ($this->runtimeStateService->isStoreBootstrapped((int) $store->id)) {
+            return to_route('filament.store.pages.dashboard', ['tenant' => $store->id]);
+        }
+
+        return view('startup.cloud-bootstrap', [
+            'store' => $store,
+            'dashboardUrl' => route('filament.store.pages.dashboard', ['tenant' => $store->id]),
+            'syncStatusUrl' => route('startup.cloud.sync-status'),
+            'syncNowUrl' => route('startup.cloud.sync-now'),
+            'syncLogUrl' => route('startup.cloud.sync-log'),
         ]);
     }
 
@@ -394,18 +434,22 @@ class StartupController extends Controller
         }
 
         $this->cloudSyncService->resetSyncFailuresForStore((int) $store->id);
-        SyncCloudStoreData::dispatch((int) $store->id);
+        $action = $this->runtimeStateService->isStoreBootstrapped((int) $store->id) ? 'delta' : 'bootstrap';
+        SyncCloudStoreData::dispatch((int) $store->id, $action);
 
         if ($request->expectsJson()) {
             return response()->json([
-                'message' => 'Cloud sync started in background.',
+                'message' => $action === 'bootstrap'
+                    ? 'Store bootstrap started in background.'
+                    : 'Delta sync started in background.',
                 'queued' => true,
                 'store_id' => (int) $store->id,
+                'action' => $action,
             ]);
         }
 
         Notification::make()
-            ->title('Cloud sync started in background')
+            ->title($action === 'bootstrap' ? 'Store bootstrap started in background' : 'Delta sync started in background')
             ->success()
             ->send();
 
@@ -439,11 +483,11 @@ class StartupController extends Controller
         }
 
         $this->cloudSyncService->resetSyncFailuresForStoreModule((int) $store->id, (string) $validated['module']);
-        SyncCloudStoreData::dispatch((int) $store->id, (string) $validated['module']);
+        SyncCloudStoreData::dispatch((int) $store->id, 'delta', (string) $validated['module']);
 
         if ($request->expectsJson()) {
             return response()->json([
-                'message' => 'Module sync started in background.',
+                'message' => 'Module delta sync started in background.',
                 'queued' => true,
                 'store_id' => (int) $store->id,
                 'module' => (string) $validated['module'],
@@ -451,7 +495,7 @@ class StartupController extends Controller
         }
 
         Notification::make()
-            ->title('Module sync started in background')
+            ->title('Module delta sync started in background')
             ->success()
             ->send();
 
@@ -477,13 +521,17 @@ class StartupController extends Controller
                 'connected' => false,
                 'is_syncing' => false,
                 'has_errors' => false,
+                'is_bootstrapping' => false,
+                'bootstrap_status' => 'not_started',
+                'bootstrap_progress_percent' => 0,
+                'bootstrap_progress_label' => null,
                 'module_syncing' => $moduleSyncing,
             ]);
         }
 
         $jobsPayloads = collect();
-        if (\Illuminate\Support\Facades\Schema::hasTable('jobs')) {
-            $jobsPayloads = \Illuminate\Support\Facades\DB::table('jobs')
+        if (Schema::hasTable('jobs')) {
+            $jobsPayloads = DB::table('jobs')
                 ->where('payload', 'like', '%SyncCloudStoreData%')
                 ->pluck('payload');
         }
@@ -531,7 +579,7 @@ class StartupController extends Controller
         $outboxErrorOverview = $this->cloudSyncService->getOutboxErrorOverviewForStore($activeStoreId);
         $hasSyncQueueFailures = false;
 
-        if (\Illuminate\Support\Facades\Schema::hasTable('failed_jobs')) {
+        if (Schema::hasTable('failed_jobs')) {
             $isFailedJobForActiveStore = function (mixed $payload, int $storeId) use ($storeIdPattern): bool {
                 if (! is_string($payload) || $storeId <= 0) {
                     return false;
@@ -550,7 +598,7 @@ class StartupController extends Controller
                     && (int) ($matches[1] ?? 0) === $storeId;
             };
 
-            $hasSyncQueueFailures = \Illuminate\Support\Facades\DB::table('failed_jobs')
+            $hasSyncQueueFailures = DB::table('failed_jobs')
                 ->where('payload', 'like', '%SyncCloudStoreData%')
                 ->orderByDesc('id')
                 ->limit(100)
@@ -562,9 +610,16 @@ class StartupController extends Controller
             || (int) ($outboxErrorOverview['total_failed'] ?? 0) > 0
             || $hasSyncQueueFailures;
 
+        $bootstrapStatus = (string) ($state->bootstrap_status ?? 'not_started');
+        $isBootstrapping = in_array($bootstrapStatus, ['downloading', 'installing'], true);
+
         return response()->json([
             'connected' => true,
-            'is_syncing' => $isSyncing,
+            'is_syncing' => $isSyncing && ! $isBootstrapping,
+            'is_bootstrapping' => $isBootstrapping,
+            'bootstrap_status' => $bootstrapStatus,
+            'bootstrap_progress_percent' => (int) ($state->bootstrap_progress_percent ?? 0),
+            'bootstrap_progress_label' => $state->bootstrap_progress_label,
             'has_errors' => $hasErrors,
             'module_syncing' => $detectedModuleSyncing,
         ]);

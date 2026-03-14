@@ -29,22 +29,31 @@ class SyncCloudStoreData implements ShouldQueue
 
     public int $storeId;
 
-    public ?string $module = null;
+    public string $action;
 
-    public ?string $resource = null;
+    public ?string $module;
 
-    public int $page = 1;
+    public ?string $resource;
 
     public function __construct(
         int $storeId,
+        string $action = 'auto',
         ?string $module = null,
         ?string $resource = null,
-        int $page = 1,
     ) {
         $this->storeId = $storeId;
+
+        if (! in_array($action, ['auto', 'bootstrap', 'delta'], true) && $module === null && $resource === null) {
+            $this->action = 'delta';
+            $this->module = $action;
+            $this->resource = null;
+
+            return;
+        }
+
+        $this->action = $action;
         $this->module = $module;
         $this->resource = $resource;
-        $this->page = max(1, $page);
     }
 
     public function handle(RuntimeStateService $runtimeStateService, CloudSyncService $cloudSyncService): void
@@ -60,41 +69,48 @@ class SyncCloudStoreData implements ShouldQueue
                 return;
             }
 
-            if ($this->module === null && $this->resource === null && $this->page === 1) {
-                foreach ($cloudSyncService->getSyncModuleKeys() as $moduleKey) {
-                    self::dispatch($this->storeId, (string) $moduleKey);
-                }
-
-                return;
+            $action = $this->action;
+            if ($action === 'auto') {
+                $action = $runtimeStateService->isStoreBootstrapped($this->storeId) ? 'delta' : 'bootstrap';
             }
 
-            $result = $cloudSyncService->syncChunk(
-                (string) $state->cloud_base_url,
-                (string) $state->cloud_token,
-                $store,
-                $this->module,
-                $this->resource,
-                $this->page,
-            );
+            $result = match ($action) {
+                'bootstrap' => $cloudSyncService->runBootstrapSync(
+                    (string) $state->cloud_base_url,
+                    (string) $state->cloud_token,
+                    $store
+                ),
+                default => $cloudSyncService->runDeltaSync(
+                    (string) $state->cloud_base_url,
+                    (string) $state->cloud_token,
+                    $store,
+                    $this->module,
+                    $this->resource
+                ),
+            };
 
             if (($result['ok'] ?? false) === true) {
-                $nextResource = $result['next']['resource'] ?? null;
-                $nextPage = (int) ($result['next']['page'] ?? 0);
-                if (is_string($nextResource) && $nextResource !== '' && $nextPage > 0) {
-                    self::dispatch($this->storeId, $this->module, $nextResource, $nextPage);
-
-                    return;
-                }
-
                 $runtimeStateService->touchLastSynced();
 
                 return;
             }
 
-            $this->recordFailure($store->id, (string) ($result['message'] ?? 'Background sync failed.'));
+            $message = (string) ($result['message'] ?? 'Background sync failed.');
+            if ($action === 'bootstrap') {
+                $runtimeStateService->markBootstrapFailed($this->storeId, $message);
+            } else {
+                $runtimeStateService->updateStoreSyncState($this->storeId, [
+                    'bootstrap_progress_label' => $message,
+                ]);
+            }
+
+            $this->recordFailure($this->storeId, $message, $action);
         } catch (Throwable $throwable) {
             report($throwable);
-            $this->recordFailure($this->storeId, $throwable->getMessage());
+            if ($this->action === 'bootstrap') {
+                $runtimeStateService->markBootstrapFailed($this->storeId, $throwable->getMessage());
+            }
+            $this->recordFailure($this->storeId, $throwable->getMessage(), $this->action);
         }
     }
 
@@ -103,22 +119,27 @@ class SyncCloudStoreData implements ShouldQueue
      */
     public function middleware(): array
     {
-        $syncScope = $this->module
-            ?? ($this->resource !== null ? 'resource-'.$this->resource : 'all');
+        $scope = implode('-', array_filter([
+            'sync-cloud-store',
+            $this->storeId,
+            $this->action,
+            $this->module,
+            $this->resource,
+        ]));
 
         return [
-            (new WithoutOverlapping('sync-cloud-store-'.$this->storeId.'-'.$syncScope))
+            (new WithoutOverlapping($scope))
                 ->dontRelease()
                 ->expireAfter(1800),
         ];
     }
 
-    private function recordFailure(int $storeId, string $error): void
+    private function recordFailure(int $storeId, string $error, string $action): void
     {
         SyncOutbox::query()->create([
             'entity_type' => 'cloud_store_sync',
             'local_id' => $storeId,
-            'operation' => 'pull',
+            'operation' => $action,
             'status' => 'failed',
             'error' => trim($error) !== '' ? $error : 'Background sync failed.',
         ]);

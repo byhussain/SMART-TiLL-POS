@@ -217,7 +217,7 @@ it('returns json stores list after cloud login', function (): void {
     $storesResponse->assertJsonPath('data.0.name', 'Main Store');
 });
 
-it('selects cloud store via json and returns dashboard redirect', function (): void {
+it('selects cloud store via json and returns bootstrap redirect', function (): void {
     config()->set('services.pos_cloud.base_url', 'https://cloud.example.test');
 
     Queue::fake();
@@ -242,8 +242,8 @@ it('selects cloud store via json and returns dashboard redirect', function (): v
     expect($anotherLocalStore)->not->toBeNull();
 
     $response->assertOk();
-    $response->assertJsonPath('message', 'Cloud store connected successfully. Initial sync started in background.');
-    $response->assertJsonPath('redirect', route('filament.store.pages.dashboard', ['tenant' => $localStore?->id]));
+    $response->assertJsonPath('message', 'Cloud store connected successfully. Store data download has started.');
+    $response->assertJsonPath('redirect', route('startup.cloud.bootstrap', ['store' => $localStore?->id]));
 
     $state = AppRuntimeState::query()->find(1);
     expect($state?->has_completed_onboarding)->toBeTrue();
@@ -258,4 +258,69 @@ it('selects cloud store via json and returns dashboard redirect', function (): v
     Queue::assertPushed(SyncCloudStoreData::class, function (SyncCloudStoreData $job) use ($localStore): bool {
         return $job->storeId === (int) $localStore?->id;
     });
+});
+
+it('redirects startup index to bootstrap screen while a cloud store is still installing', function (): void {
+    $store = Store::query()->create([
+        'name' => 'Cloud Store',
+        'server_id' => 11,
+    ]);
+
+    AppRuntimeState::query()->create([
+        'id' => 1,
+        'has_completed_onboarding' => true,
+        'mode' => 'cloud',
+        'active_store_id' => $store->id,
+        'cloud_token_present' => true,
+        'cloud_token' => 'token',
+        'cloud_base_url' => 'https://cloud.example.test',
+        'store_sync_states' => [
+            (string) $store->id => [
+                'bootstrap_status' => 'installing',
+                'bootstrap_progress_percent' => 66,
+                'bootstrap_progress_label' => 'Installing variations',
+                'bootstrap_generation' => 'abc',
+                'last_delta_pull_at' => null,
+                'last_delta_push_at' => null,
+            ],
+        ],
+    ]);
+
+    $response = $this->get(route('startup.index'));
+
+    $response->assertRedirect(route('startup.cloud.bootstrap', ['store' => $store->id]));
+});
+
+it('shows bootstrap progress page while a cloud store is still installing', function (): void {
+    $store = Store::query()->create([
+        'name' => 'Cloud Store',
+        'server_id' => 11,
+    ]);
+
+    AppRuntimeState::query()->create([
+        'id' => 1,
+        'has_completed_onboarding' => true,
+        'mode' => 'cloud',
+        'active_store_id' => $store->id,
+        'cloud_token_present' => true,
+        'cloud_token' => 'token',
+        'cloud_base_url' => 'https://cloud.example.test',
+        'store_sync_states' => [
+            (string) $store->id => [
+                'bootstrap_status' => 'installing',
+                'bootstrap_progress_percent' => 66,
+                'bootstrap_progress_label' => 'Installing variations',
+                'bootstrap_generation' => 'abc',
+                'last_delta_pull_at' => null,
+                'last_delta_push_at' => null,
+            ],
+        ],
+    ]);
+
+    $response = $this->get(route('startup.cloud.bootstrap', ['store' => $store->id]));
+
+    $response->assertOk();
+    $response->assertSee('Preparing Cloud Store for offline POS use.', escape: false);
+    $response->assertSee('Large stores can take a few minutes on the first load.');
+    $response->assertSee('refreshStatus', escape: false);
 });

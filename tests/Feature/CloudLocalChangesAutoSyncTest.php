@@ -5,6 +5,7 @@ use App\Models\AppRuntimeState;
 use App\Models\Store;
 use App\Observers\DispatchCloudSyncObserver;
 use App\Services\CloudSyncService;
+use App\Services\DeviceIdentifierService;
 use App\Services\LocalIdentifierService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
@@ -18,8 +19,8 @@ uses(RefreshDatabase::class);
 
 it('dispatches cloud sync job for cloud-connected local model changes', function (): void {
     app()->instance(
-        \App\Services\DeviceIdentifierService::class,
-        new class extends \App\Services\DeviceIdentifierService
+        DeviceIdentifierService::class,
+        new class extends DeviceIdentifierService
         {
             public function getPrefix(): string
             {
@@ -53,7 +54,9 @@ it('dispatches cloud sync job for cloud-connected local model changes', function
     app(DispatchCloudSyncObserver::class)->created($customer);
 
     Bus::assertDispatched(SyncCloudStoreData::class, function (SyncCloudStoreData $job) use ($store): bool {
-        return $job->storeId === (int) $store->id && $job->module === 'customers';
+        return $job->storeId === (int) $store->id
+            && $job->action === 'delta'
+            && $job->resource === 'customers';
     });
 
     $createdCustomer = Customer::query()->findOrFail($customer->id);
@@ -74,8 +77,8 @@ it('dispatches cloud sync job for cloud-connected local model changes', function
 
 it('resets local id suffix per store for the same device prefix', function (): void {
     app()->instance(
-        \App\Services\DeviceIdentifierService::class,
-        new class extends \App\Services\DeviceIdentifierService
+        DeviceIdentifierService::class,
+        new class extends DeviceIdentifierService
         {
             public function getPrefix(): string
             {
@@ -114,8 +117,8 @@ it('resets local id suffix per store for the same device prefix', function (): v
 
 it('recreates local id sequence table at runtime when missing', function (): void {
     app()->instance(
-        \App\Services\DeviceIdentifierService::class,
-        new class extends \App\Services\DeviceIdentifierService
+        DeviceIdentifierService::class,
+        new class extends DeviceIdentifierService
         {
             public function getPrefix(): string
             {
@@ -158,8 +161,8 @@ it('recreates local id sequence table at runtime when missing', function (): voi
 
 it('maintains local id counters per table for the same store and device', function (): void {
     app()->instance(
-        \App\Services\DeviceIdentifierService::class,
-        new class extends \App\Services\DeviceIdentifierService
+        DeviceIdentifierService::class,
+        new class extends DeviceIdentifierService
         {
             public function getPrefix(): string
             {
@@ -227,12 +230,25 @@ it('pushes pending table rows even when sync outbox is empty', function (): void
             return Http::response(['id' => 1], 200);
         }
 
-        if (str_contains($url, '/api/pos/v1/stores/101/sync/customers/upsert')) {
+        if (str_contains($url, '/api/pos/v2/stores/101/delta/upsert')) {
             return Http::response([
-                'message' => 'Upsert completed.',
-                'results' => [
-                    ['index' => 0, 'status' => 'synced'],
-                ],
+                'message' => 'Delta upsert completed.',
+                'resources' => [[
+                    'resource' => 'customers',
+                    'results' => [
+                        ['index' => 0, 'status' => 'synced'],
+                    ],
+                ]],
+            ], 200);
+        }
+
+        if (str_contains($url, '/api/pos/v2/stores/101/delta/ack')) {
+            return Http::response(['message' => 'ok'], 200);
+        }
+
+        if (str_contains($url, '/api/pos/v2/stores/101/delta')) {
+            return Http::response([
+                'data' => [],
             ], 200);
         }
 
@@ -259,11 +275,12 @@ it('pushes pending table rows even when sync outbox is empty', function (): void
     ]);
 
     Http::assertSent(function ($request): bool {
-        if (! str_contains($request->url(), '/api/pos/v1/stores/101/sync/customers/upsert')) {
+        if (! str_contains($request->url(), '/api/pos/v2/stores/101/delta/upsert')) {
             return false;
         }
 
-        $rows = $request->data()['rows'] ?? [];
+        $resources = $request->data()['resources'] ?? [];
+        $rows = $resources[0]['rows'] ?? [];
 
         return count($rows) === 1
             && ! array_key_exists('id', $rows[0])
