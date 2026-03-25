@@ -18,7 +18,16 @@ return [
     |
     */
 
-    'driver' => env('SESSION_DRIVER', 'database'),
+    'driver' => (static function (): string {
+        $configuredSessionDriver = (string) env('SESSION_DRIVER', 'database');
+        $databaseConnection = (string) env('DB_CONNECTION', 'sqlite');
+
+        if ($databaseConnection === 'sqlite' && $configuredSessionDriver === 'database') {
+            return 'file';
+        }
+
+        return $configuredSessionDriver;
+    })(),
 
     /*
     |--------------------------------------------------------------------------

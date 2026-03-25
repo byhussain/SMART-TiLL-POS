@@ -357,7 +357,7 @@
                                                 @click="syncModule(@js($moduleKey))"
                                             >
                                                 <svg
-                                                    x-show="!!syncingModules[@js($moduleKey)] || !!moduleQueueSyncing[@js($moduleKey)] || isQueueSyncing || isBootstrapping"
+                                                    x-show="!!syncingModules[@js($moduleKey)] || !!moduleQueueSyncing[@js($moduleKey)] || isBootstrapping"
                                                     xmlns="http://www.w3.org/2000/svg"
                                                     class="h-3 w-3 animate-spin"
                                                     viewBox="0 0 24 24"
@@ -368,7 +368,7 @@
                                                 >
                                                     <path d="M12 2v4m0 12v4m10-10h-4M6 12H2m16.95 6.95-2.83-2.83M7.88 7.88 5.05 5.05m13.9 0-2.83 2.83M7.88 16.12l-2.83 2.83"/>
                                                 </svg>
-                                                <span x-text="(syncingModules[@js($moduleKey)] || moduleQueueSyncing[@js($moduleKey)] || isQueueSyncing || isBootstrapping) ? 'Syncing...' : 'Sync'"></span>
+                                                <span x-text="(syncingModules[@js($moduleKey)] || moduleQueueSyncing[@js($moduleKey)] || isBootstrapping) ? 'Syncing...' : 'Sync'"></span>
                                             </button>
                                         </div>
                                     </div>

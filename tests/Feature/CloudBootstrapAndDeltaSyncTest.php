@@ -553,6 +553,253 @@ it('backfills full sales resources when syncing the sales module', function (): 
     ]);
 });
 
+it('preserves multiple sale preparable items that share the same sequence during sales module backfill', function (): void {
+    $store = Store::query()->create([
+        'id' => 3,
+        'name' => 'Cloud Store',
+        'server_id' => 11,
+    ]);
+
+    AppRuntimeState::query()->create([
+        'id' => 1,
+        'has_completed_onboarding' => true,
+        'mode' => 'cloud',
+        'cloud_token_present' => true,
+        'cloud_token' => 'token',
+        'cloud_base_url' => 'https://cloud.example.test',
+        'active_store_id' => $store->id,
+        'bootstrap_status' => 'ready',
+        'bootstrap_progress_percent' => 100,
+        'store_sync_states' => [
+            (string) $store->id => [
+                'bootstrap_status' => 'ready',
+                'bootstrap_progress_percent' => 100,
+                'bootstrap_progress_label' => 'Store data is ready.',
+                'bootstrap_generation' => 'generation-1',
+                'last_delta_pull_at' => now()->subHours(2)->toISOString(),
+                'last_delta_push_at' => null,
+            ],
+        ],
+    ]);
+
+    DB::table('products')->insert([
+        'id' => 1,
+        'store_id' => $store->id,
+        'server_id' => 201,
+        'name' => 'Test Product',
+        'status' => 'active',
+        'has_variations' => 1,
+        'created_at' => now()->subDay(),
+        'updated_at' => now()->subDay(),
+        'sync_state' => 'synced',
+    ]);
+
+    DB::table('variations')->insert([
+        [
+            'id' => 1,
+            'store_id' => $store->id,
+            'product_id' => 1,
+            'server_id' => 301,
+            'description' => 'Parent Variation',
+            'price' => 10000,
+            'created_at' => now()->subDay(),
+            'updated_at' => now()->subDay(),
+            'sync_state' => 'synced',
+        ],
+        [
+            'id' => 2,
+            'store_id' => $store->id,
+            'product_id' => 1,
+            'server_id' => 302,
+            'description' => 'Nested A',
+            'price' => 1000,
+            'created_at' => now()->subDay(),
+            'updated_at' => now()->subDay(),
+            'sync_state' => 'synced',
+        ],
+        [
+            'id' => 3,
+            'store_id' => $store->id,
+            'product_id' => 1,
+            'server_id' => 303,
+            'description' => 'Nested B',
+            'price' => 2000,
+            'created_at' => now()->subDay(),
+            'updated_at' => now()->subDay(),
+            'sync_state' => 'synced',
+        ],
+    ]);
+
+    DB::table('stocks')->insert([
+        [
+            'id' => 1,
+            'variation_id' => 1,
+            'server_id' => 401,
+            'barcode' => 'SYNC-STOCK-PARENT',
+            'stock' => 5,
+            'created_at' => now()->subDay(),
+            'updated_at' => now()->subDay(),
+            'sync_state' => 'synced',
+        ],
+        [
+            'id' => 2,
+            'variation_id' => 2,
+            'server_id' => 402,
+            'barcode' => 'SYNC-STOCK-A',
+            'stock' => 5,
+            'created_at' => now()->subDay(),
+            'updated_at' => now()->subDay(),
+            'sync_state' => 'synced',
+        ],
+        [
+            'id' => 3,
+            'variation_id' => 3,
+            'server_id' => 403,
+            'barcode' => 'SYNC-STOCK-B',
+            'stock' => 5,
+            'created_at' => now()->subDay(),
+            'updated_at' => now()->subDay(),
+            'sync_state' => 'synced',
+        ],
+    ]);
+
+    Http::fake([
+        'https://cloud.example.test/api/pos/user' => Http::response(['id' => 1], 200),
+        'https://cloud.example.test/api/pos/v2/stores/11/delta*' => Http::response([
+            'data' => [],
+        ], 200),
+        'https://cloud.example.test/api/pos/v2/stores/11/delta/upsert' => Http::response([
+            'resources' => [],
+        ], 200),
+        'https://cloud.example.test/api/pos/v2/stores/11/delta/ack' => Http::response(['message' => 'ok'], 200),
+        'https://cloud.example.test/api/pos/v1/stores/11/sync/sales*' => Http::response([
+            'data' => [[
+                'id' => 701,
+                'store_id' => 11,
+                'customer_id' => null,
+                'subtotal' => 3000,
+                'tax' => 0,
+                'discount' => 0,
+                'discount_type' => 'flat',
+                'freight_fare' => 0,
+                'total' => 3000,
+                'status' => 'completed',
+                'payment_status' => 'paid',
+                'payment_method' => 'cash',
+                'use_fbr' => 0,
+                'paid_at' => now()->subHour()->toISOString(),
+                'created_at' => now()->subHour()->toISOString(),
+                'updated_at' => now()->toISOString(),
+            ]],
+            'meta' => ['current_page' => 1, 'last_page' => 1],
+        ], 200),
+        'https://cloud.example.test/api/pos/v1/stores/11/sync/sale_variation*' => Http::response([
+            'data' => [[
+                'sale_id' => 701,
+                'variation_id' => 301,
+                'stock_id' => 401,
+                'description' => 'Parent Variation',
+                'quantity' => 1,
+                'unit_price' => 3000,
+                'tax' => 0,
+                'discount' => 0,
+                'total' => 3000,
+                'supplier_price' => 1000,
+                'supplier_total' => 1000,
+                'is_preparable' => 1,
+                'created_at' => now()->subHour()->toISOString(),
+                'updated_at' => now()->toISOString(),
+            ]],
+            'meta' => ['current_page' => 1, 'last_page' => 1],
+        ], 200),
+        'https://cloud.example.test/api/pos/v1/stores/11/sync/sale_preparable_items*' => Http::response([
+            'data' => [
+                [
+                    'id' => 9001,
+                    'sale_id' => 701,
+                    'sequence' => 0,
+                    'preparable_variation_id' => 301,
+                    'variation_id' => 302,
+                    'stock_id' => 402,
+                    'quantity' => 1,
+                    'unit_price' => 1000,
+                    'tax' => 0,
+                    'discount' => 0,
+                    'total' => 1000,
+                    'supplier_price' => 500,
+                    'supplier_total' => 500,
+                    'created_at' => now()->subHour()->toISOString(),
+                    'updated_at' => now()->toISOString(),
+                ],
+                [
+                    'id' => 9002,
+                    'sale_id' => 701,
+                    'sequence' => 0,
+                    'preparable_variation_id' => 301,
+                    'variation_id' => 303,
+                    'stock_id' => 403,
+                    'quantity' => 2,
+                    'unit_price' => 1000,
+                    'tax' => 0,
+                    'discount' => 0,
+                    'total' => 2000,
+                    'supplier_price' => 500,
+                    'supplier_total' => 1000,
+                    'created_at' => now()->subHour()->toISOString(),
+                    'updated_at' => now()->toISOString(),
+                ],
+            ],
+            'meta' => ['current_page' => 1, 'last_page' => 1],
+        ], 200),
+        'https://cloud.example.test/api/pos/v1/stores/11/sync/customers*' => Http::response([
+            'data' => [],
+            'meta' => ['current_page' => 1, 'last_page' => 1],
+        ], 200),
+        'https://cloud.example.test/api/pos/v1/stores/11/sync/products*' => Http::response([
+            'data' => [],
+            'meta' => ['current_page' => 1, 'last_page' => 1],
+        ], 200),
+        'https://cloud.example.test/api/pos/v1/stores/11/sync/variations*' => Http::response([
+            'data' => [],
+            'meta' => ['current_page' => 1, 'last_page' => 1],
+        ], 200),
+        'https://cloud.example.test/api/pos/v1/stores/11/sync/stocks*' => Http::response([
+            'data' => [],
+            'meta' => ['current_page' => 1, 'last_page' => 1],
+        ], 200),
+        'https://cloud.example.test/api/pos/v1/stores/11/sync/*' => Http::response([
+            'data' => [],
+            'meta' => ['current_page' => 1, 'last_page' => 1],
+        ], 200),
+    ]);
+
+    $result = app(CloudSyncService::class)->runDeltaSync('https://cloud.example.test', 'token', $store, 'sales');
+
+    expect($result['ok'])->toBeTrue();
+
+    $localSaleId = (int) DB::table('sales')->where('server_id', 701)->value('id');
+
+    expect(DB::table('sale_preparable_items')
+        ->where('sale_id', $localSaleId)
+        ->count())->toBe(2);
+
+    $this->assertDatabaseHas('sale_preparable_items', [
+        'sale_id' => $localSaleId,
+        'server_id' => 9001,
+        'preparable_variation_id' => 1,
+        'variation_id' => 2,
+        'stock_id' => 2,
+    ]);
+
+    $this->assertDatabaseHas('sale_preparable_items', [
+        'sale_id' => $localSaleId,
+        'server_id' => 9002,
+        'preparable_variation_id' => 1,
+        'variation_id' => 3,
+        'stock_id' => 3,
+    ]);
+});
+
 it('retries deferred sales child rows during full resource pulls', function (): void {
     $store = Store::query()->create([
         'id' => 3,

@@ -63,7 +63,13 @@ class DispatchCloudSyncObserver
             return;
         }
 
-        SyncCloudStoreData::dispatch($storeId, 'delta', null, $resource);
+        if (in_array($resource, ['sales', 'sale_variation', 'sale_preparable_items'], true)) {
+            SyncCloudStoreData::dispatch($storeId, 'delta', 'sales')->afterCommit();
+
+            return;
+        }
+
+        SyncCloudStoreData::dispatch($storeId, 'delta', null, $resource)->afterCommit();
     }
 
     private function ensureServerManagedReference(Model $model): void

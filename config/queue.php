@@ -13,7 +13,16 @@ return [
     |
     */
 
-    'default' => env('QUEUE_CONNECTION', 'database'),
+    'default' => (static function (): string {
+        $configuredQueueConnection = (string) env('QUEUE_CONNECTION', 'database');
+        $databaseConnection = (string) env('DB_CONNECTION', 'sqlite');
+
+        if ($databaseConnection === 'sqlite' && $configuredQueueConnection === 'database') {
+            return 'background';
+        }
+
+        return $configuredQueueConnection;
+    })(),
 
     /*
     |--------------------------------------------------------------------------

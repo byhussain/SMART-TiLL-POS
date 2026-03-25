@@ -969,3 +969,470 @@ it('pull syncs sale variation rows when the payload has no id fields', function 
         'unit_price' => 1000,
     ]);
 });
+
+it('pushes pending sale variation rows when syncing the sales module', function (): void {
+    $store = Store::query()->create([
+        'name' => 'Main Store',
+        'server_id' => 101,
+    ]);
+
+    $saleId = DB::table('sales')->insertGetId([
+        'store_id' => $store->id,
+        'server_id' => 5001,
+        'local_id' => 'DEV001-10',
+        'reference' => '3049',
+        'status' => 'completed',
+        'payment_status' => 'paid',
+        'payment_method' => 'cash',
+        'discount_type' => 'flat',
+        'freight_fare' => 0,
+        'subtotal' => 150000,
+        'tax' => 0,
+        'discount' => 0,
+        'total' => 150000,
+        'sync_state' => 'synced',
+        'synced_at' => now(),
+        'sync_error' => null,
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    $productId = DB::table('products')->insertGetId([
+        'store_id' => $store->id,
+        'server_id' => 7001,
+        'name' => 'Synced Product',
+        'status' => 'active',
+        'has_variations' => 1,
+        'sync_state' => 'synced',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    $variationId = DB::table('variations')->insertGetId([
+        'store_id' => $store->id,
+        'product_id' => $productId,
+        'server_id' => 8001,
+        'description' => 'Synced Variation',
+        'price' => 150000,
+        'sync_state' => 'synced',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    $stockId = DB::table('stocks')->insertGetId([
+        'variation_id' => $variationId,
+        'server_id' => 9001,
+        'barcode' => 'SYNC-SALE-VAR',
+        'stock' => 10,
+        'sync_state' => 'synced',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    DB::table('sale_variation')->insert([
+        'sale_id' => $saleId,
+        'variation_id' => $variationId,
+        'stock_id' => $stockId,
+        'quantity' => 1,
+        'unit_price' => 150000,
+        'tax' => 0,
+        'discount' => 0,
+        'discount_type' => 'flat',
+        'total' => 150000,
+        'supplier_price' => 100000,
+        'supplier_total' => 100000,
+        'is_preparable' => 0,
+        'local_id' => 'DEV001-11',
+        'sync_state' => 'pending',
+        'synced_at' => null,
+        'sync_error' => null,
+    ]);
+
+    Http::fake(function ($request) {
+        $url = $request->url();
+
+        if (str_ends_with($url, '/api/pos/user')) {
+            return Http::response(['id' => 1], 200);
+        }
+
+        if (str_contains($url, '/api/pos/v2/stores/101/delta/upsert')) {
+            return Http::response([
+                'message' => 'Delta upsert completed.',
+                'resources' => [
+                    [
+                        'resource' => 'sale_variation',
+                        'results' => [
+                            ['index' => 0, 'status' => 'synced'],
+                        ],
+                    ],
+                ],
+            ], 200);
+        }
+
+        if (str_contains($url, '/api/pos/v2/stores/101/delta/ack')) {
+            return Http::response(['message' => 'ok'], 200);
+        }
+
+        if (str_contains($url, '/api/pos/v2/stores/101/delta')) {
+            return Http::response([
+                'data' => [],
+            ], 200);
+        }
+
+        if (str_contains($url, '/api/pos/v1/stores/101/sync/')) {
+            return Http::response([
+                'data' => [],
+                'meta' => ['current_page' => 1, 'last_page' => 1],
+            ], 200);
+        }
+
+        return Http::response([], 200);
+    });
+
+    $result = app(CloudSyncService::class)->runDeltaSync('https://cloud.example.test', 'token', $store, 'sales');
+
+    expect($result['ok'])->toBeTrue();
+
+    Http::assertSent(function ($request): bool {
+        if (! str_contains($request->url(), '/api/pos/v2/stores/101/delta/upsert')) {
+            return false;
+        }
+
+        $resources = collect($request->data()['resources'] ?? []);
+        $saleVariationRows = collect($resources->firstWhere('resource', 'sale_variation')['rows'] ?? []);
+
+        return $saleVariationRows->contains(function (array $row): bool {
+            return ($row['sale_id'] ?? null) === 5001
+                && ($row['variation_id'] ?? null) === 8001
+                && ($row['stock_id'] ?? null) === 9001
+                && ($row['local_id'] ?? null) === 'DEV001-11';
+        });
+    });
+
+    $this->assertDatabaseHas('sale_variation', [
+        'sale_id' => $saleId,
+        'variation_id' => $variationId,
+        'stock_id' => $stockId,
+        'sync_state' => 'synced',
+    ]);
+});
+
+it('pushes a newly created local sale and its sale variation rows in the same sales sync cycle', function (): void {
+    $store = Store::query()->create([
+        'name' => 'Main Store',
+        'server_id' => 101,
+    ]);
+
+    $productId = DB::table('products')->insertGetId([
+        'store_id' => $store->id,
+        'server_id' => 7001,
+        'name' => 'Synced Product',
+        'status' => 'active',
+        'has_variations' => 1,
+        'sync_state' => 'synced',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    $variationId = DB::table('variations')->insertGetId([
+        'store_id' => $store->id,
+        'product_id' => $productId,
+        'server_id' => 8001,
+        'description' => 'Synced Variation',
+        'price' => 150000,
+        'sync_state' => 'synced',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    $stockId = DB::table('stocks')->insertGetId([
+        'variation_id' => $variationId,
+        'server_id' => 9001,
+        'barcode' => 'SYNC-SALE-VAR',
+        'stock' => 10,
+        'sync_state' => 'synced',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    $saleId = DB::table('sales')->insertGetId([
+        'store_id' => $store->id,
+        'server_id' => null,
+        'local_id' => 'DEV001-20',
+        'reference' => '5001',
+        'status' => 'completed',
+        'payment_status' => 'paid',
+        'payment_method' => 'cash',
+        'discount_type' => 'flat',
+        'freight_fare' => 0,
+        'subtotal' => 150000,
+        'tax' => 0,
+        'discount' => 0,
+        'total' => 150000,
+        'sync_state' => 'pending',
+        'synced_at' => null,
+        'sync_error' => null,
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    DB::table('sale_variation')->insert([
+        'sale_id' => $saleId,
+        'variation_id' => $variationId,
+        'stock_id' => $stockId,
+        'quantity' => 1,
+        'unit_price' => 150000,
+        'tax' => 0,
+        'discount' => 0,
+        'discount_type' => 'flat',
+        'total' => 150000,
+        'supplier_price' => 100000,
+        'supplier_total' => 100000,
+        'is_preparable' => 0,
+        'local_id' => 'DEV001-21',
+        'sync_state' => 'pending',
+        'synced_at' => null,
+        'sync_error' => null,
+    ]);
+
+    Http::fake(function ($request) {
+        $url = $request->url();
+
+        if (str_ends_with($url, '/api/pos/user')) {
+            return Http::response(['id' => 1], 200);
+        }
+
+        if (str_contains($url, '/api/pos/v2/stores/101/delta/upsert')) {
+            $resources = collect($request->data()['resources'] ?? []);
+            $resource = (string) ($resources->first()['resource'] ?? '');
+
+            if ($resource === 'sales') {
+                return Http::response([
+                    'message' => 'Delta upsert completed.',
+                    'resources' => [[
+                        'resource' => 'sales',
+                        'results' => [
+                            ['index' => 0, 'status' => 'synced', 'server_id' => 5001],
+                        ],
+                    ]],
+                ], 200);
+            }
+
+            if ($resource === 'sale_variation') {
+                return Http::response([
+                    'message' => 'Delta upsert completed.',
+                    'resources' => [[
+                        'resource' => 'sale_variation',
+                        'results' => [
+                            ['index' => 0, 'status' => 'synced'],
+                        ],
+                    ]],
+                ], 200);
+            }
+        }
+
+        if (str_contains($url, '/api/pos/v2/stores/101/delta/ack')) {
+            return Http::response(['message' => 'ok'], 200);
+        }
+
+        if (str_contains($url, '/api/pos/v2/stores/101/delta')) {
+            return Http::response([
+                'data' => [],
+            ], 200);
+        }
+
+        if (str_contains($url, '/api/pos/v1/stores/101/sync/')) {
+            return Http::response([
+                'data' => [],
+                'meta' => ['current_page' => 1, 'last_page' => 1],
+            ], 200);
+        }
+
+        return Http::response([], 200);
+    });
+
+    $result = app(CloudSyncService::class)->runDeltaSync('https://cloud.example.test', 'token', $store, 'sales');
+
+    expect($result['ok'])->toBeTrue();
+
+    Http::assertSent(function ($request): bool {
+        if (! str_contains($request->url(), '/api/pos/v2/stores/101/delta/upsert')) {
+            return false;
+        }
+
+        $resources = collect($request->data()['resources'] ?? []);
+
+        return $resources->pluck('resource')->contains('sales')
+            || $resources->pluck('resource')->contains('sale_variation');
+    });
+
+    Http::assertNotSent(function ($request): bool {
+        return str_contains($request->url(), '/api/pos/v1/stores/101/sync/sales')
+            || str_contains($request->url(), '/api/pos/v1/stores/101/sync/sale_variation')
+            || str_contains($request->url(), '/api/pos/v1/stores/101/sync/sale_preparable_items');
+    });
+
+    $this->assertDatabaseHas('sales', [
+        'id' => $saleId,
+        'server_id' => 5001,
+        'sync_state' => 'synced',
+    ]);
+
+    $this->assertDatabaseHas('sale_variation', [
+        'sale_id' => $saleId,
+        'variation_id' => $variationId,
+        'stock_id' => $stockId,
+        'sync_state' => 'synced',
+    ]);
+});
+
+it('updates an existing local sale variation quantity when the server edits that sale', function (): void {
+    $store = Store::query()->create([
+        'name' => 'Main Store',
+        'server_id' => 101,
+    ]);
+
+    $productId = DB::table('products')->insertGetId([
+        'store_id' => $store->id,
+        'server_id' => 7001,
+        'name' => 'Synced Product',
+        'status' => 'active',
+        'has_variations' => 1,
+        'sync_state' => 'synced',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    $variationId = DB::table('variations')->insertGetId([
+        'store_id' => $store->id,
+        'product_id' => $productId,
+        'server_id' => 8001,
+        'description' => 'Synced Variation',
+        'price' => 150000,
+        'sync_state' => 'synced',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    $stockId = DB::table('stocks')->insertGetId([
+        'variation_id' => $variationId,
+        'server_id' => 9001,
+        'barcode' => 'SYNC-SALE-VAR',
+        'stock' => 10,
+        'sync_state' => 'synced',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    $saleId = DB::table('sales')->insertGetId([
+        'store_id' => $store->id,
+        'server_id' => 5001,
+        'local_id' => 'DEV001-30',
+        'reference' => '6001',
+        'status' => 'completed',
+        'payment_status' => 'paid',
+        'payment_method' => 'cash',
+        'discount_type' => 'flat',
+        'freight_fare' => 0,
+        'subtotal' => 150000,
+        'tax' => 0,
+        'discount' => 0,
+        'total' => 150000,
+        'sync_state' => 'synced',
+        'synced_at' => now(),
+        'sync_error' => null,
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    DB::table('sale_variation')->insert([
+        'sale_id' => $saleId,
+        'variation_id' => $variationId,
+        'stock_id' => $stockId,
+        'quantity' => 1,
+        'unit_price' => 150000,
+        'tax' => 0,
+        'discount' => 0,
+        'discount_type' => 'flat',
+        'total' => 150000,
+        'supplier_price' => 100000,
+        'supplier_total' => 100000,
+        'is_preparable' => 0,
+        'sync_state' => 'synced',
+        'synced_at' => now(),
+        'sync_error' => null,
+    ]);
+
+    Http::fake(function ($request) {
+        $url = $request->url();
+
+        if (str_ends_with($url, '/api/pos/user')) {
+            return Http::response(['id' => 1], 200);
+        }
+
+        if (str_contains($url, '/api/pos/v2/stores/101/delta/ack')) {
+            return Http::response(['message' => 'ok'], 200);
+        }
+
+        if (str_contains($url, '/api/pos/v2/stores/101/delta')) {
+            return Http::response([
+                'data' => [
+                    [
+                        'resource' => 'sales',
+                        'rows' => [[
+                            'id' => 5001,
+                            'local_id' => 'DEV001-30',
+                            'reference' => '6001',
+                            'store_id' => 101,
+                            'status' => 'completed',
+                            'payment_status' => 'paid',
+                            'payment_method' => 'cash',
+                            'discount_type' => 'flat',
+                            'freight_fare' => 0,
+                            'subtotal' => 150000,
+                            'tax' => 0,
+                            'discount' => 0,
+                            'total' => 150000,
+                        ]],
+                        'tombstones' => [],
+                    ],
+                    [
+                        'resource' => 'sale_variation',
+                        'rows' => [[
+                            'sale_id' => 5001,
+                            'variation_id' => 8001,
+                            'stock_id' => 9001,
+                            'description' => 'Synced Variation',
+                            'quantity' => 5,
+                            'unit_price' => 150000,
+                            'tax' => 0,
+                            'discount' => 0,
+                            'discount_type' => 'flat',
+                            'total' => 750000,
+                            'supplier_price' => 100000,
+                            'supplier_total' => 500000,
+                            'is_preparable' => 0,
+                        ]],
+                        'tombstones' => [],
+                    ],
+                ],
+            ], 200);
+        }
+
+        return Http::response([], 200);
+    });
+
+    $result = app(CloudSyncService::class)->runDeltaSync('https://cloud.example.test', 'token', $store, 'sales');
+
+    expect($result['ok'])->toBeTrue();
+    expect(DB::table('sale_variation')->where('sale_id', $saleId)->count())->toBe(1);
+
+    $this->assertDatabaseHas('sale_variation', [
+        'sale_id' => $saleId,
+        'variation_id' => $variationId,
+        'stock_id' => $stockId,
+        'quantity' => 5,
+        'total' => 750000,
+        'supplier_total' => 500000,
+    ]);
+});

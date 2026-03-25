@@ -668,6 +668,8 @@ class CloudSyncService
             return ['ok' => false, 'message' => 'Invalid sync module selected.'];
         }
 
+        $hasPendingLocalRows = $this->hasPendingRowsForResources((int) $localStore->id, $resources);
+
         $runtimeStateService = app(RuntimeStateService::class);
         $runtimeStateService->markDeltaSyncing((int) $localStore->id, 'Pulling cloud updates');
 
@@ -705,12 +707,33 @@ class CloudSyncService
             return ['ok' => false, 'message' => $message];
         }
 
-        $pulled = $this->applyDeltaResources((array) ($deltaResponse->json('data') ?? []), (int) $localStore->id);
+        $deltaPayload = $deltaResponse->json();
+        if (! is_array($deltaPayload) || ! array_key_exists('data', $deltaPayload)) {
+            $pushed = $this->pushPendingRows($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
+            $pulled = $this->pullAllResources($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
+            $runtimeStateService->markDeltaCompleted((int) $localStore->id);
+
+            return [
+                'ok' => true,
+                'mode' => 'delta',
+                'module' => $module,
+                'resource' => $resource,
+                'pulled' => $pulled,
+                'pushed' => $pushed,
+                'fallback' => 'v1',
+            ];
+        }
+
+        $pulled = $this->applyDeltaResources((array) ($deltaPayload['data'] ?? []), (int) $localStore->id);
         $runtimeStateService->markDeltaPulled((int) $localStore->id);
         $pushed = $this->pushPendingRowsV2($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
         $backfilled = 0;
 
-        if ($module !== null && in_array($module, self::CRITICAL_RECONCILE_MODULES, true)) {
+        if (
+            $module !== null
+            && in_array($module, self::CRITICAL_RECONCILE_MODULES, true)
+            && ! $hasPendingLocalRows
+        ) {
             $runtimeStateService->updateStoreSyncState((int) $localStore->id, [
                 'bootstrap_progress_label' => 'Backfilling full sales data',
             ]);
@@ -841,7 +864,10 @@ class CloudSyncService
             ->limit(100);
 
         if (! empty($resources)) {
-            $pendingQuery->whereIn('entity_type', $resources);
+            $pendingQuery->whereIn('entity_type', array_values(array_unique([
+                ...$resources,
+                ...self::ACCESS_CONTROL_ENTITIES,
+            ])));
         }
 
         $pending = $pendingQuery->get();
@@ -908,6 +934,22 @@ class CloudSyncService
 
             if ($rows->isEmpty()) {
                 continue;
+            }
+
+            if (in_array($resource, ['sale_variation', 'sale_preparable_items'], true)) {
+                $saleIds = $rows
+                    ->pluck('sale_id')
+                    ->filter(fn ($saleId): bool => is_numeric($saleId))
+                    ->map(fn ($saleId): int => (int) $saleId)
+                    ->unique()
+                    ->values();
+
+                if ($saleIds->isNotEmpty()) {
+                    $rows = $this->applyStoreScope(DB::table($resource), $resource, $localStoreId)
+                        ->whereIn('sale_id', $saleIds->all())
+                        ->tap(fn (Builder $query) => $this->applyDefaultOrder($query, $resource))
+                        ->get();
+                }
             }
 
             $payloadRows = [];
@@ -986,15 +1028,25 @@ class CloudSyncService
                 $error = (string) ($result['error'] ?? '');
 
                 if ($status === 'synced') {
-                    $this->updateLocalRowSyncStatus(
-                        $resource,
-                        $row,
-                        [
-                            'sync_state' => 'synced',
-                            'synced_at' => now(),
-                            'sync_error' => null,
-                        ]
-                    );
+                    $updates = [
+                        'sync_state' => 'synced',
+                        'synced_at' => now(),
+                        'sync_error' => null,
+                    ];
+
+                    if (Schema::hasColumn($resource, 'server_id') && is_numeric($result['server_id'] ?? null)) {
+                        $updates['server_id'] = (int) $result['server_id'];
+                    }
+
+                    if (Schema::hasColumn($resource, 'local_id') && filled($result['local_id'] ?? null)) {
+                        $updates['local_id'] = (string) $result['local_id'];
+                    }
+
+                    if (Schema::hasColumn($resource, 'reference') && filled($result['reference'] ?? null)) {
+                        $updates['reference'] = (string) $result['reference'];
+                    }
+
+                    $this->updateLocalRowSyncStatus($resource, $row, $updates);
                     $pushedCount++;
                 } else {
                     $this->updateLocalRowSyncStatus(
@@ -1398,8 +1450,7 @@ class CloudSyncService
     private function pushPendingRowsV2(string $baseUrl, string $token, int $serverStoreId, int $localStoreId, array $resources = []): int
     {
         $resourceList = $resources !== [] ? $resources : self::PULL_ORDER;
-        $payloadResources = [];
-        $trackedRows = [];
+        $pushedCount = 0;
 
         foreach ($resourceList as $resource) {
             if (! Schema::hasTable($resource) || ! Schema::hasColumn($resource, 'sync_state')) {
@@ -1454,45 +1505,31 @@ class CloudSyncService
                 continue;
             }
 
-            $payloadResources[] = [
-                'resource' => $resource,
-                'rows' => $payloadRows,
-            ];
-            $trackedRows[$resource] = array_values($rowsForResponse);
-        }
+            $response = Http::baseUrl($baseUrl)
+                ->withToken($token)
+                ->acceptJson()
+                ->post("/api/pos/v2/stores/{$serverStoreId}/delta/upsert", [
+                    'resources' => [[
+                        'resource' => $resource,
+                        'rows' => $payloadRows,
+                        'replace_by_sale' => in_array($resource, ['sale_variation', 'sale_preparable_items'], true),
+                    ]],
+                ]);
 
-        if ($payloadResources === []) {
-            return 0;
-        }
+            if (! $response->successful()) {
+                $error = (string) ($response->json('message') ?? $response->body() ?: 'Unable to push local changes.');
 
-        $response = Http::baseUrl($baseUrl)
-            ->withToken($token)
-            ->acceptJson()
-            ->post("/api/pos/v2/stores/{$serverStoreId}/delta/upsert", [
-                'resources' => $payloadResources,
-            ]);
-
-        if (! $response->successful()) {
-            $error = (string) ($response->json('message') ?? $response->body() ?: 'Unable to push local changes.');
-
-            foreach ($trackedRows as $resource => $rowsForResponse) {
                 foreach ($rowsForResponse as $row) {
                     $this->updateLocalRowSyncStatus($resource, $row, [
                         'sync_state' => 'failed',
                         'sync_error' => $error,
                     ]);
                 }
+
+                continue;
             }
 
-            return 0;
-        }
-
-        $pushedCount = 0;
-        $resourceResults = collect((array) $response->json('resources', []))
-            ->mapWithKeys(fn (array $resourceResult): array => [(string) ($resourceResult['resource'] ?? '') => (array) ($resourceResult['results'] ?? [])]);
-
-        foreach ($trackedRows as $resource => $rowsForResponse) {
-            $results = collect($resourceResults[$resource] ?? []);
+            $results = collect((array) data_get($response->json(), 'resources.0.results', []));
 
             foreach (array_values($rowsForResponse) as $index => $row) {
                 $result = $results->firstWhere('index', $index);
@@ -1500,11 +1537,25 @@ class CloudSyncService
                 $error = (string) ($result['error'] ?? '');
 
                 if ($status === 'synced') {
-                    $this->updateLocalRowSyncStatus($resource, $row, [
+                    $updates = [
                         'sync_state' => 'synced',
                         'synced_at' => now(),
                         'sync_error' => null,
-                    ]);
+                    ];
+
+                    if (Schema::hasColumn($resource, 'server_id') && is_numeric($result['server_id'] ?? null)) {
+                        $updates['server_id'] = (int) $result['server_id'];
+                    }
+
+                    if (Schema::hasColumn($resource, 'local_id') && filled($result['local_id'] ?? null)) {
+                        $updates['local_id'] = (string) $result['local_id'];
+                    }
+
+                    if (Schema::hasColumn($resource, 'reference') && filled($result['reference'] ?? null)) {
+                        $updates['reference'] = (string) $result['reference'];
+                    }
+
+                    $this->updateLocalRowSyncStatus($resource, $row, $updates);
                     $pushedCount++;
                 } else {
                     $this->updateLocalRowSyncStatus($resource, $row, [
@@ -1580,6 +1631,25 @@ class CloudSyncService
         }
 
         return self::MODULE_DEFINITIONS[$module]['resources'] ?? [];
+    }
+
+    private function hasPendingRowsForResources(int $localStoreId, array $resources): bool
+    {
+        foreach ($resources as $resource) {
+            if (! Schema::hasTable($resource) || ! Schema::hasColumn($resource, 'sync_state')) {
+                continue;
+            }
+
+            $hasPendingRows = $this->applyStoreScope(DB::table($resource), $resource, $localStoreId)
+                ->whereIn('sync_state', ['pending', 'failed'])
+                ->exists();
+
+            if ($hasPendingRows) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function applyStoreScope(Builder $query, string $table, int $storeId): Builder
@@ -2008,6 +2078,8 @@ class CloudSyncService
             if (is_numeric($localId)) {
                 $payload[$idColumn] = (int) $localId;
                 $payload[$typeColumn] = $canonicalClass;
+            } elseif ($table === 'model_activities' && $prefix === 'activityable') {
+                $payload[$typeColumn] = $canonicalClass;
             } elseif ($this->isNullableColumn($table, $idColumn)) {
                 $payload[$idColumn] = null;
                 $payload[$typeColumn] = $canonicalClass;
@@ -2293,25 +2365,50 @@ class CloudSyncService
                 return [];
             }
 
+            if (isset($payload['variation_id']) && $payload['variation_id'] !== null && $payload['variation_id'] !== '') {
+                if (! empty($payload['stock_id'])) {
+                    return [
+                        'sale_id' => (int) $payload['sale_id'],
+                        'variation_id' => $payload['variation_id'],
+                        'stock_id' => $payload['stock_id'],
+                        'is_preparable' => (int) ($payload['is_preparable'] ?? 0),
+                    ];
+                }
+
+                return [
+                    'sale_id' => (int) $payload['sale_id'],
+                    'variation_id' => $payload['variation_id'],
+                ];
+            }
+
+            if (filled($payload['local_id'] ?? null)) {
+                return [
+                    'sale_id' => (int) $payload['sale_id'],
+                    'local_id' => (string) $payload['local_id'],
+                ];
+            }
+
             return [
                 'sale_id' => (int) $payload['sale_id'],
-                'variation_id' => $payload['variation_id'] ?? null,
-                'stock_id' => $payload['stock_id'] ?? null,
+                'variation_id' => null,
+                'stock_id' => null,
                 'is_preparable' => (int) ($payload['is_preparable'] ?? 0),
                 'description' => (string) ($payload['description'] ?? ''),
-                'quantity' => $payload['quantity'] ?? 0,
                 'unit_price' => $payload['unit_price'] ?? 0,
             ];
         }
 
         if ($table === 'sale_preparable_items') {
-            if (! isset($payload['sale_id'], $payload['sequence'])) {
+            if (! isset($payload['sale_id'], $payload['sequence'], $payload['preparable_variation_id'], $payload['variation_id'])) {
                 return [];
             }
 
             return [
                 'sale_id' => (int) $payload['sale_id'],
                 'sequence' => (int) $payload['sequence'],
+                'preparable_variation_id' => (int) $payload['preparable_variation_id'],
+                'variation_id' => (int) $payload['variation_id'],
+                'stock_id' => isset($payload['stock_id']) && is_numeric($payload['stock_id']) ? (int) $payload['stock_id'] : null,
             ];
         }
 

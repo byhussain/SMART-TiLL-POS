@@ -2,11 +2,12 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <title>Invoice #{{ $sale->id }}</title>
+    <title>Invoice #{{ $sale->local_id ?: ($sale->server_id ?: $sale->id) }}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1"/>
 
     @php
         $settingsService = app(\SmartTill\Core\Services\CoreStoreSettingsService::class);
+        $invoiceNumber = (string) ($sale->local_id ?: ($sale->server_id ?: $sale->id));
 
         // Paper size configuration
         $receiptFormat = $sale->store
@@ -76,6 +77,10 @@
         $showDifferences = $sale->store
             ? $settingsService->getShowDifferencesInReceipt($sale->store)
             : false;
+        $showHeaderNote = $sale->shouldShowHeaderNoteInReceipt();
+        $showFooterNote = $sale->shouldShowFooterNoteInReceipt();
+        $headerNote = $sale->headerNote();
+        $footerNote = $sale->footer_note;
 
 
         // Get currency code from store
@@ -262,6 +267,10 @@
     </style>
 </head>
 <body class="paper-{{ $paper }} {{ $paperClass }} mx-auto p-1 font-sans text-slate-800 bg-white antialiased">
+    <div class="no-print flex items-center justify-center gap-3 mb-4 bg-white p-4 rounded-lg border border-slate-200 shadow-sm flex-wrap">
+        <button type="button" onclick="prepareAndPrint()" class="inline-flex items-center justify-center rounded-md bg-slate-900 text-white px-5 py-2 text-sm font-semibold shadow">Print</button>
+        <a href="{{ $next }}" onclick="return goBack(event);" class="inline-flex items-center justify-center rounded-md border border-slate-300 bg-white text-slate-900 px-5 py-2 text-sm font-semibold">Back</a>
+    </div>
 
     <!-- Receipt Container -->
 <div class="print-container">
@@ -298,7 +307,7 @@
                 <div class="text-xs text-slate-700 {{ $isThermal ? 'text-left' : 'text-right' }}">
                     <div class="{{ $isThermal ? 'text-left' : 'text-right' }}">
                         <span class="text-slate-500">Invoice:</span>
-                        <span class="ml-1 font-semibold text-slate-900">#{{ $sale->reference }}</span>
+                        <span class="ml-1 font-semibold text-slate-900">#{{ $invoiceNumber }}</span>
                     </div>
                     <div class="{{ $isThermal ? 'text-left' : 'text-right' }}">
                         <span class="text-slate-500">Date:</span>
@@ -364,11 +373,11 @@
         </div>
         @endif
 
-        @if($sale->note)
+        @if($showHeaderNote && filled($headerNote))
             <div class="customer-box mb-1">
-                <div class="text-xs font-bold text-slate-700 mb-0.5 uppercase tracking-wider">Note</div>
+                <div class="text-xs font-bold text-slate-700 mb-0.5 uppercase tracking-wider">Header Note</div>
                 <div class="text-xs text-slate-700 leading-tight">
-                    <span class="font-bold text-slate-700">{{ $sale->note }}</span>
+                    <span>{{ $headerNote }}</span>
                 </div>
             </div>
         @endif
@@ -576,6 +585,15 @@
                 <span>Total Amount:</span>
                     <span class="whitespace-nowrap text-blue-600 {{ $totalAmountClass }}">{{ $fmtTotal($finalTotal) }} {{ $currencyCode }}</span>
             </div>
+
+            @if($showFooterNote && filled($footerNote))
+                <div class="customer-box mt-2">
+                    <div class="text-xs font-bold text-slate-700 mb-0.5 uppercase tracking-wider">Footer Note</div>
+                    <div class="text-xs text-slate-700 leading-tight">
+                        <span>{{ $footerNote }}</span>
+                    </div>
+                </div>
+            @endif
         </div>
 
             <!-- Thank You Message (Hidden on multi-page) -->
@@ -630,6 +648,21 @@
         if (redirected) return;
         redirected = true;
         location.replace(nextUrl);
+    }
+
+    function goBack(event) {
+        if (event) {
+            event.preventDefault();
+        }
+
+        if (window.history.length > 1) {
+            window.history.back();
+            return false;
+        }
+
+        goNext();
+
+        return false;
     }
 
     function scheduleReturn(delay = 250) {
@@ -713,6 +746,12 @@
     document.addEventListener('visibilitychange', () => {
         if (printDialogRequested && document.visibilityState === 'visible') {
             scheduleReturn(250);
+        }
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            goBack(event);
         }
     });
 

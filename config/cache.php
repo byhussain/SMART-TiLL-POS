@@ -15,7 +15,16 @@ return [
     |
     */
 
-    'default' => env('CACHE_STORE', 'database'),
+    'default' => (static function (): string {
+        $configuredCacheStore = (string) env('CACHE_STORE', 'database');
+        $databaseConnection = (string) env('DB_CONNECTION', 'sqlite');
+
+        if ($databaseConnection === 'sqlite' && $configuredCacheStore === 'database') {
+            return 'file';
+        }
+
+        return $configuredCacheStore;
+    })(),
 
     /*
     |--------------------------------------------------------------------------

@@ -5,6 +5,7 @@ use App\Models\AppRuntimeState;
 use App\Models\Store;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
 
@@ -114,4 +115,54 @@ it('returns has_errors true when selected store has outbox sync failures', funct
         ->assertJsonPath('connected', true)
         ->assertJsonPath('is_syncing', false)
         ->assertJsonPath('has_errors', true);
+});
+
+it('does not report syncing for stale reserved jobs after a sync queue failure', function (): void {
+    $store = Store::query()->create([
+        'name' => 'Store A',
+        'server_id' => 101,
+    ]);
+
+    AppRuntimeState::query()->create([
+        'id' => 1,
+        'has_completed_onboarding' => true,
+        'mode' => 'cloud',
+        'cloud_token_present' => true,
+        'cloud_token' => 'token',
+        'cloud_base_url' => 'https://cloud.example.test',
+        'active_store_id' => $store->id,
+    ]);
+
+    $payload = json_encode([
+        'displayName' => SyncCloudStoreData::class,
+        'data' => [
+            'commandName' => SyncCloudStoreData::class,
+            'command' => serialize(new SyncCloudStoreData((int) $store->id, 'delta', 'sales')),
+        ],
+    ]);
+
+    DB::table('jobs')->insert([
+        'queue' => 'default',
+        'payload' => $payload,
+        'attempts' => 1,
+        'reserved_at' => now()->subMinutes(5)->timestamp,
+        'available_at' => now()->timestamp,
+        'created_at' => now()->subMinutes(5)->timestamp,
+    ]);
+
+    DB::table('failed_jobs')->insert([
+        'uuid' => (string) Str::uuid(),
+        'connection' => 'database',
+        'queue' => 'default',
+        'payload' => $payload,
+        'exception' => 'database is locked',
+        'failed_at' => now(),
+    ]);
+
+    $this->getJson(route('startup.cloud.sync-status'))
+        ->assertOk()
+        ->assertJsonPath('connected', true)
+        ->assertJsonPath('is_syncing', false)
+        ->assertJsonPath('has_errors', true)
+        ->assertJsonPath('module_syncing.sales', false);
 });

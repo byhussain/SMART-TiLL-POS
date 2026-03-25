@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use SmartTill\Core\Models\Customer;
+use SmartTill\Core\Models\Sale;
 use SmartTill\Core\Models\StoreSetting;
 
 uses(RefreshDatabase::class);
@@ -56,6 +57,7 @@ it('dispatches cloud sync job for cloud-connected local model changes', function
     Bus::assertDispatched(SyncCloudStoreData::class, function (SyncCloudStoreData $job) use ($store): bool {
         return $job->storeId === (int) $store->id
             && $job->action === 'delta'
+            && $job->afterCommit === true
             && $job->resource === 'customers';
     });
 
@@ -73,6 +75,48 @@ it('dispatches cloud sync job for cloud-connected local model changes', function
     $secondCustomer = Customer::query()->findOrFail($secondCustomer->id);
     expect((string) $secondCustomer->local_id)->toBe('ABC123-2');
     expect($secondCustomer->reference)->toBeNull();
+});
+
+it('dispatches the sales module sync when a local sale changes', function (): void {
+    $store = Store::query()->create([
+        'name' => 'Store A',
+        'server_id' => 101,
+    ]);
+
+    AppRuntimeState::query()->create([
+        'id' => 1,
+        'has_completed_onboarding' => true,
+        'mode' => 'cloud',
+        'cloud_token_present' => true,
+        'cloud_token' => 'token',
+        'cloud_base_url' => 'https://cloud.example.test',
+        'active_store_id' => $store->id,
+    ]);
+
+    Bus::fake();
+
+    $sale = Sale::query()->create([
+        'store_id' => $store->id,
+        'status' => 'completed',
+        'payment_status' => 'paid',
+        'payment_method' => 'cash',
+        'discount_type' => 'flat',
+        'freight_fare' => 0,
+        'subtotal' => 1000,
+        'tax' => 0,
+        'discount' => 0,
+        'total' => 1000,
+    ]);
+
+    app(DispatchCloudSyncObserver::class)->created($sale);
+
+    Bus::assertDispatched(SyncCloudStoreData::class, function (SyncCloudStoreData $job) use ($store): bool {
+        return $job->storeId === (int) $store->id
+            && $job->action === 'delta'
+            && $job->module === 'sales'
+            && $job->afterCommit === true
+            && $job->resource === null;
+    });
 });
 
 it('resets local id suffix per store for the same device prefix', function (): void {

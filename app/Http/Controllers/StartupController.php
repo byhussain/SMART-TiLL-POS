@@ -529,11 +529,11 @@ class StartupController extends Controller
             ]);
         }
 
-        $jobsPayloads = collect();
+        $queuedSyncJobs = collect();
         if (Schema::hasTable('jobs')) {
-            $jobsPayloads = DB::table('jobs')
+            $queuedSyncJobs = DB::table('jobs')
                 ->where('payload', 'like', '%SyncCloudStoreData%')
-                ->pluck('payload');
+                ->get(['payload', 'reserved_at', 'available_at', 'created_at']);
         }
 
         $isSyncing = false;
@@ -541,8 +541,10 @@ class StartupController extends Controller
         $storeIdPattern = '/s:7:"storeId";i:(\d+);/';
         $modulePattern = '/s:6:"module";(?:N;|s:\d+:"([^"]*)";)/';
         $activeStoreId = (int) $store->id;
+        $activeReservedThreshold = now()->subMinutes(2)->timestamp;
 
-        foreach ($jobsPayloads as $payload) {
+        foreach ($queuedSyncJobs as $queuedSyncJob) {
+            $payload = $queuedSyncJob->payload ?? null;
             if (! is_string($payload)) {
                 continue;
             }
@@ -562,6 +564,14 @@ class StartupController extends Controller
 
             $payloadStoreId = (int) ($storeMatches[1] ?? 0);
             if ($payloadStoreId !== $activeStoreId) {
+                continue;
+            }
+
+            $reservedAt = is_numeric($queuedSyncJob->reserved_at ?? null)
+                ? (int) $queuedSyncJob->reserved_at
+                : null;
+
+            if ($reservedAt !== null && $reservedAt < $activeReservedThreshold) {
                 continue;
             }
 
@@ -609,6 +619,10 @@ class StartupController extends Controller
         $hasErrors = (bool) ($syncErrorOverview['has_sync_errors'] ?? false)
             || (int) ($outboxErrorOverview['total_failed'] ?? 0) > 0
             || $hasSyncQueueFailures;
+
+        if ($hasSyncQueueFailures && ! $isSyncing) {
+            $detectedModuleSyncing = $moduleSyncing;
+        }
 
         $bootstrapStatus = (string) ($state->bootstrap_status ?? 'not_started');
         $isBootstrapping = in_array($bootstrapStatus, ['downloading', 'installing'], true);
