@@ -3380,16 +3380,16 @@
         },
         {
             "name": "livewire/livewire",
-            "version": "v4.2.1",
+            "version": "v4.2.2",
             "source": {
                 "type": "git",
                 "url": "https://github.com/livewire/livewire.git",
-                "reference": "93e972fa42c1b34fff1550093ab94f778d81ea5a"
+                "reference": "71c28888f99b4bfdaad89a07a104adbc3f98c04b"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/livewire/livewire/zipball/93e972fa42c1b34fff1550093ab94f778d81ea5a",
-                "reference": "93e972fa42c1b34fff1550093ab94f778d81ea5a",
+                "url": "https://api.github.com/repos/livewire/livewire/zipball/71c28888f99b4bfdaad89a07a104adbc3f98c04b",
+                "reference": "71c28888f99b4bfdaad89a07a104adbc3f98c04b",
                 "shasum": ""
             },
             "require": {
@@ -3444,7 +3444,7 @@
             "description": "A front-end framework for Laravel.",
             "support": {
                 "issues": "https://github.com/livewire/livewire/issues",
-                "source": "https://github.com/livewire/livewire/tree/v4.2.1"
+                "source": "https://github.com/livewire/livewire/tree/v4.2.2"
             },
             "funding": [
                 {
@@ -3452,7 +3452,7 @@
                     "type": "github"
                 }
             ],
-            "time": "2026-02-28T00:01:19+00:00"
+            "time": "2026-03-25T23:19:23+00:00"
         },
         {
             "name": "monolog/monolog",
@@ -5482,16 +5482,16 @@
         },
         {
             "name": "smart-till/core",
-            "version": "v1.0.22",
+            "version": "v1.0.23",
             "source": {
                 "type": "git",
                 "url": "https://github.com/SMART-DADDY/core.git",
-                "reference": "270e912672cad4bbbe8983f383742c4a9818d007"
+                "reference": "5c50e9ee03050eace05e882cb502d6905f5410fd"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/SMART-DADDY/core/zipball/270e912672cad4bbbe8983f383742c4a9818d007",
-                "reference": "270e912672cad4bbbe8983f383742c4a9818d007",
+                "url": "https://api.github.com/repos/SMART-DADDY/core/zipball/5c50e9ee03050eace05e882cb502d6905f5410fd",
+                "reference": "5c50e9ee03050eace05e882cb502d6905f5410fd",
                 "shasum": ""
             },
             "require": {
@@ -5530,10 +5530,10 @@
             ],
             "description": "SMART TiLL core Filament modules",
             "support": {
-                "source": "https://github.com/SMART-DADDY/core/tree/v1.0.22",
+                "source": "https://github.com/SMART-DADDY/core/tree/v1.0.23",
                 "issues": "https://github.com/SMART-DADDY/core/issues"
             },
-            "time": "2026-03-25T14:58:24+00:00"
+            "time": "2026-03-26T07:04:43+00:00"
         },
         {
             "name": "spatie/invade",
@@ -9087,16 +9087,16 @@
         },
         {
             "name": "laravel/boost",
-            "version": "v2.4.0",
+            "version": "v2.4.1",
             "source": {
                 "type": "git",
                 "url": "https://github.com/laravel/boost.git",
-                "reference": "a09bebcff238ed92fd123e460b27bd58bed22520"
+                "reference": "f6241df9fd81a86d79a051851177d4ffe3e28506"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/laravel/boost/zipball/a09bebcff238ed92fd123e460b27bd58bed22520",
-                "reference": "a09bebcff238ed92fd123e460b27bd58bed22520",
+                "url": "https://api.github.com/repos/laravel/boost/zipball/f6241df9fd81a86d79a051851177d4ffe3e28506",
+                "reference": "f6241df9fd81a86d79a051851177d4ffe3e28506",
                 "shasum": ""
             },
             "require": {
@@ -9149,7 +9149,7 @@
                 "issues": "https://github.com/laravel/boost/issues",
                 "source": "https://github.com/laravel/boost"
             },
-            "time": "2026-03-23T16:01:08+00:00"
+            "time": "2026-03-25T16:37:40+00:00"
         },
         {
             "name": "laravel/mcp",

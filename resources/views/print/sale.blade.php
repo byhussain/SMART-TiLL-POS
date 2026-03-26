@@ -81,6 +81,12 @@
         $showFooterNote = $sale->shouldShowFooterNoteInReceipt();
         $headerNote = $sale->headerNote();
         $footerNote = $sale->footer_note;
+        $headerNoteLabel = $sale->store
+            ? $settingsService->getHeaderNoteLabel($sale->store)
+            : 'Header Note';
+        $footerNoteLabel = $sale->store
+            ? $settingsService->getFooterNoteLabel($sale->store)
+            : 'Footer Note';
 
 
         // Get currency code from store
@@ -375,7 +381,7 @@
 
         @if($showHeaderNote && filled($headerNote))
             <div class="customer-box mb-1">
-                <div class="text-xs font-bold text-slate-700 mb-0.5 uppercase tracking-wider">Header Note</div>
+                <div class="text-xs font-bold text-slate-700 mb-0.5 uppercase tracking-wider">{{ $headerNoteLabel }}</div>
                 <div class="text-xs text-slate-700 leading-tight">
                     <span>{{ $headerNote }}</span>
                 </div>
@@ -588,7 +594,7 @@
 
             @if($showFooterNote && filled($footerNote))
                 <div class="customer-box mt-2">
-                    <div class="text-xs font-bold text-slate-700 mb-0.5 uppercase tracking-wider">Footer Note</div>
+                    <div class="text-xs font-bold text-slate-700 mb-0.5 uppercase tracking-wider">{{ $footerNoteLabel }}</div>
                     <div class="text-xs text-slate-700 leading-tight">
                         <span>{{ $footerNote }}</span>
                     </div>
