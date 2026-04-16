@@ -134,4 +134,4 @@ jobs:
         run: php artisan native:install --publish --no-interaction
 
       - name: Publish NativePHP release
-        run: php artisan native:publish win x64 --no-interaction
+        run: php artisan native:publish win --no-interaction
