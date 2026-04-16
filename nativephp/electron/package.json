@@ -1,10 +1,10 @@
 {
-    "name": "smart-till-dev",
+    "name": "smart-till",
     "version": "1.0.0",
-    "description": "An awesome app built with NativePHP",
+    "description": "A point of sale system built with Laravel and NativePHP.",
     "main": "./out/main/index.js",
-    "author": null,
-    "homepage": "https://nativephp.com",
+    "author": "SMART DADDY",
+    "homepage": "https://smart-till.app",
     "type": "module",
     "engines": {
         "node": ">=22.0.0"
