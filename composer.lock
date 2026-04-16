@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "00bb9ebcf7f77ac0a919a06f6e2e9b34",
+    "content-hash": "662810e23130b26bdb6795b115838083",
     "packages": [
         {
             "name": "blade-ui-kit/blade-heroicons",
@@ -5561,16 +5561,16 @@
         },
         {
             "name": "smart-till/core",
-            "version": "v1.0.4",
+            "version": "dev-dev",
             "source": {
                 "type": "git",
                 "url": "https://github.com/hussain-sd/core.git",
-                "reference": "e178f00f785bc6144e91b0e37f63d99ead0ea2de"
+                "reference": "c8805e077e36c1cb32f4aaa01230a90fe2b43c73"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/hussain-sd/core/zipball/e178f00f785bc6144e91b0e37f63d99ead0ea2de",
-                "reference": "e178f00f785bc6144e91b0e37f63d99ead0ea2de",
+                "url": "https://api.github.com/repos/hussain-sd/core/zipball/c8805e077e36c1cb32f4aaa01230a90fe2b43c73",
+                "reference": "c8805e077e36c1cb32f4aaa01230a90fe2b43c73",
                 "shasum": ""
             },
             "require": {
@@ -5606,9 +5606,9 @@
             "description": "SMART TiLL core Filament modules",
             "support": {
                 "issues": "https://github.com/hussain-sd/core/issues",
-                "source": "https://github.com/hussain-sd/core/tree/v1.0.4"
+                "source": "https://github.com/hussain-sd/core/tree/dev"
             },
-            "time": "2026-04-02T21:13:45+00:00"
+            "time": "2026-04-13T07:37:39+00:00"
         },
         {
             "name": "spatie/invade",
@@ -12247,7 +12247,9 @@
     ],
     "aliases": [],
     "minimum-stability": "stable",
-    "stability-flags": {},
+    "stability-flags": {
+        "smart-till/core": 20
+    },
     "prefer-stable": true,
     "prefer-lowest": false,
     "platform": {

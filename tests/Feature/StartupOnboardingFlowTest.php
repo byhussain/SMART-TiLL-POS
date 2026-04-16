@@ -20,7 +20,7 @@ it('shows startup screen on first launch', function (): void {
 
     $response->assertOk();
     $response->assertSee('Continue as Guest');
-    $response->assertSee('Login to Cloud');
+    $response->assertSee('Cloud Login Coming Soon');
 });
 
 it('shows cloud auth screen', function (): void {
@@ -28,8 +28,8 @@ it('shows cloud auth screen', function (): void {
 
     $response->assertOk();
     $response->assertSee('Connect POS to Cloud');
-    $response->assertSee('Login to Cloud');
-    $response->assertSee('Register on Cloud');
+    $response->assertSee('Cloud Login Coming Soon');
+    $response->assertSee('Desktop cloud authentication and store sync setup will be available in a future release.');
 });
 
 it('redirects guest flow to startup setup when no store exists', function (): void {

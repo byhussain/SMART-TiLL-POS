@@ -226,26 +226,22 @@
         },
     }"
     x-init="init()"
-    class="relative pl-2"
+    class="relative flex items-center justify-center"
 >
-    <button
-        type="button"
-        @click="open = true"
-        class="inline-flex h-10 w-10 items-center justify-center rounded-md transition"
-        title="Cloud sync status"
-        aria-label="Open cloud sync status"
-    >
-        @if ($isCloudConnected)
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 {{ $iconColorClass }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+    <div class="group relative inline-flex items-center">
+        <span
+            class="inline-flex items-center justify-center text-slate-500 transition hover:text-slate-700 dark:text-slate-300 dark:hover:text-white"
+            title="Cloud Sync Coming Soon"
+            aria-label="Cloud sync coming soon"
+        >
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
                 <path d="M18 10a6 6 0 0 0-11.3-2.6A4.5 4.5 0 0 0 7 16h9a4 4 0 0 0 2-7.5"/>
             </svg>
-        @else
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 {{ $iconColorClass }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                <path d="M18 10a6 6 0 0 0-11.3-2.6A4.5 4.5 0 0 0 7 16h9a4 4 0 0 0 2-7.5"/>
-                <path d="m3 3 18 18"/>
-            </svg>
-        @endif
-    </button>
+        </span>
+        <span class="pointer-events-none absolute left-1/2 top-full z-10 mt-2 -translate-x-1/2 whitespace-nowrap rounded-md bg-slate-900 px-2.5 py-1 text-xs font-medium text-white opacity-0 shadow-lg transition group-hover:opacity-100 group-focus-within:opacity-100 dark:bg-slate-100 dark:text-slate-900">
+            Cloud Sync Coming Soon
+        </span>
+    </div>
 
     <div x-cloak class="fixed inset-0 z-50" :class="{ 'pointer-events-none': !open }" @keydown.escape.window="open = false">
         <div
