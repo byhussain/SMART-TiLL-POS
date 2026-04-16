@@ -1,0 +1,125 @@
+name: NativePHP Publish macOS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nativephp-publish-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish-macos:
+    name: Publish macOS build
+    runs-on: macos-latest
+
+    env:
+      APP_ENV: production
+      APP_DEBUG: false
+      APP_URL: http://localhost
+      APP_NAME: SMART TiLL
+      APP_LOCALE: en
+      APP_FALLBACK_LOCALE: en
+      APP_FAKER_LOCALE: en_US
+      APP_MAINTENANCE_DRIVER: file
+      BCRYPT_ROUNDS: 12
+      LOG_CHANNEL: stack
+      LOG_STACK: single
+      LOG_DEPRECATIONS_CHANNEL: null
+      LOG_LEVEL: debug
+      DB_CONNECTION: sqlite
+      DB_DATABASE: ${{ github.workspace }}/database/database.sqlite
+      SESSION_DRIVER: database
+      SESSION_LIFETIME: 43200
+      SESSION_ENCRYPT: false
+      SESSION_PATH: /
+      SESSION_DOMAIN: null
+      BROADCAST_CONNECTION: log
+      FILESYSTEM_DISK: local
+      QUEUE_CONNECTION: database
+      CACHE_STORE: database
+      MEMCACHED_HOST: 127.0.0.1
+      REDIS_CLIENT: phpredis
+      REDIS_HOST: 127.0.0.1
+      REDIS_PASSWORD: null
+      REDIS_PORT: 6379
+      MAIL_MAILER: log
+      MAIL_SCHEME: null
+      MAIL_HOST: 127.0.0.1
+      MAIL_PORT: 2525
+      MAIL_USERNAME: null
+      MAIL_PASSWORD: null
+      MAIL_FROM_ADDRESS: hello@example.com
+      MAIL_FROM_NAME: SMART TiLL
+      AWS_ACCESS_KEY_ID: ''
+      AWS_SECRET_ACCESS_KEY: ''
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_BUCKET: ''
+      AWS_USE_PATH_STYLE_ENDPOINT: false
+      VITE_APP_NAME: SMART TiLL
+      POS_CLOUD_BASE_URL: https://smart-till.app
+      NATIVEPHP_APP_ID: app.smart-till
+      NATIVEPHP_APP_AUTHOR: SMART DADDY
+      NATIVEPHP_APP_COPYRIGHT: Copyright (c) 2026 Smart Till. All rights reserved.
+      NATIVEPHP_APP_DESCRIPTION: A point of sale system built with Laravel and NativePHP.
+      NATIVEPHP_APP_WEBSITE: https://smart-till.app
+      NATIVEPHP_UPDATER_ENABLED: true
+      NATIVEPHP_UPDATER_PROVIDER: github
+      GITHUB_REPO: SMART-TiLL-POS
+      GITHUB_OWNER: hussain-sd
+      GITHUB_RELEASE_TYPE: release
+      GITHUB_V_PREFIXED_TAG_NAME: true
+      GITHUB_PRIVATE: false
+      GITHUB_CHANNEL: latest
+      GITHUB_TOKEN: ${{ secrets.TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, intl, fileinfo, pdo_sqlite, sqlite3, zip
+          tools: composer:v2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Prepare environment
+        run: |
+          cp .env.example .env
+          mkdir -p database
+          touch database/database.sqlite
+
+      - name: Install PHP dependencies
+        run: composer install --no-interaction --prefer-dist --optimize-autoloader
+
+      - name: Generate app key
+        run: php artisan key:generate --force
+
+      - name: Run database migrations
+        run: php artisan migrate --force
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build frontend assets
+        run: npm run build
+
+      - name: Install NativePHP scaffolding
+        run: php artisan native:install --publish --no-interaction
+
+      - name: Publish NativePHP release
+        run: php artisan native:publish mac --no-interaction
