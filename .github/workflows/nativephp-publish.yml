@@ -130,13 +130,8 @@ jobs:
       - name: Build frontend assets
         run: npm run build
 
-      - name: Install NativePHP Electron dependencies
-        working-directory: nativephp/electron
-        run: npm ci
-
-      - name: Build NativePHP Electron plugin
-        working-directory: nativephp/electron
-        run: npm run plugin:build
+      - name: Install NativePHP scaffolding
+        run: php artisan native:install --publish --no-interaction
 
       - name: Publish NativePHP release
         run: php artisan native:publish all --no-interaction
