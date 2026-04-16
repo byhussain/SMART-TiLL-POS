@@ -98,10 +98,11 @@ jobs:
           cache: npm
 
       - name: Prepare environment
+        shell: pwsh
         run: |
-          cp .env.example .env
-          mkdir -p database
-          touch database/database.sqlite
+          Copy-Item .env.example .env -Force
+          if (!(Test-Path database)) { New-Item -ItemType Directory -Path database | Out-Null }
+          if (!(Test-Path database/database.sqlite)) { New-Item -ItemType File -Path database/database.sqlite | Out-Null }
 
       - name: Install PHP dependencies
         run: composer install --no-interaction --prefer-dist --optimize-autoloader
