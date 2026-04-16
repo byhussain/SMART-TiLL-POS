@@ -131,4 +131,4 @@ jobs:
         run: npm run build
 
       - name: Publish NativePHP release
-        run: php artisan native:publish --no-interaction
+        run: php artisan native:publish all --no-interaction
