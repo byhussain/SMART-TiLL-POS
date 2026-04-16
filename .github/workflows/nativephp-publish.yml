@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  publish-linux:
-    name: Publish Linux build
+  publish-windows:
+    name: Publish Windows build only
     runs-on: ubuntu-latest
 
     env:
@@ -134,4 +134,4 @@ jobs:
         run: php artisan native:install --publish --no-interaction
 
       - name: Publish NativePHP release
-        run: php artisan native:publish all --no-interaction
+        run: php artisan native:publish win --no-interaction
