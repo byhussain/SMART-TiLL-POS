@@ -1,4 +1,4 @@
-name: NativePHP Publish
+name: NativePHP Publish Windows
 
 on:
   push:
