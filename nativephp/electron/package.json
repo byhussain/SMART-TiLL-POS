@@ -1,14 +1,15 @@
 {
-    "name": "smart-till-dev",
-    "version": "1.0.0",
-    "description": "An awesome app built with NativePHP",
+    "name": "laravel",
+    "version": "1.0.4",
+    "description": "A point of sale system built with Laravel and NativePHP.",
     "main": "./out/main/index.js",
-    "author": null,
-    "homepage": "https://nativephp.com",
+    "author": "SMART DADDY",
+    "homepage": "https://smart-till.app",
     "type": "module",
     "engines": {
         "node": ">=22.0.0"
     },
+    "repository": "https://github.com/byhussain/SMART-TiLL-POS",
     "scripts": {
         "format": "prettier --write .",
         "lint": "eslint . --fix",
