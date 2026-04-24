@@ -20,8 +20,8 @@ concurrency:
 
 env:
   APP_NAME: SMART TiLL
-  APP_ENV: production
-  APP_DEBUG: false
+  APP_ENV: local
+  APP_DEBUG: true
   APP_URL: http://localhost
   APP_KEY: ${{ secrets.APP_KEY }}
   APP_LOCALE: en
