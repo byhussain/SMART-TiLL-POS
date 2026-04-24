@@ -159,6 +159,11 @@ jobs:
       - name: Prepare environment
         run: |
           cp .env.example .env
+          php -r "
+            \$env = file_get_contents('.env');
+            \$env = preg_replace('/^APP_KEY=.*/m', 'APP_KEY=' . getenv('APP_KEY'), \$env);
+            file_put_contents('.env', \$env);
+          "
           mkdir -p database
           touch database/database.sqlite
 
@@ -181,8 +186,11 @@ jobs:
       - name: Install NativePHP
         run: php artisan native:install --publish --no-interaction
 
-      - name: Restore custom assets overwritten by native:install
-        run: git restore .
+      - name: Restore customised files overwritten by native:install
+        run: |
+          git restore nativephp/electron/build/icon.png
+          git restore nativephp/electron/electron-builder.mjs
+          git restore nativephp/electron/package.json
 
       - name: Publish NativePHP for all platforms
         run: php artisan native:publish all --no-interaction
