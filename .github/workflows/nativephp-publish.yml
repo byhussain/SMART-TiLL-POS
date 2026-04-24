@@ -179,10 +179,10 @@ jobs:
         run: npm run build
 
       - name: Install NativePHP
-        run: php artisan native:install --no-interaction
+        run: php artisan native:install --publish --no-interaction
 
-#      - name: Restore custom assets overwritten by native:install
-#        run: git restore .
+      - name: Restore custom assets overwritten by native:install
+        run: git restore .
 
       - name: Publish NativePHP for all platforms
         run: php artisan native:publish all --no-interaction
