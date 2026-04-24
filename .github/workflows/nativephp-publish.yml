@@ -18,64 +18,64 @@ concurrency:
   group: nativephp-publish-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  APP_NAME: SMART TiLL
-  APP_ENV: local
-  APP_DEBUG: true
-  APP_URL: http://localhost
-  APP_KEY: ${{ secrets.APP_KEY }}
-  APP_LOCALE: en
-  APP_FALLBACK_LOCALE: en
-  APP_FAKER_LOCALE: en_US
-  APP_MAINTENANCE_DRIVER: file
-  BCRYPT_ROUNDS: 12
-  LOG_CHANNEL: stack
-  LOG_STACK: single
-  LOG_DEPRECATIONS_CHANNEL: null
-  LOG_LEVEL: debug
-  DB_CONNECTION: sqlite
-  DB_BUSY_TIMEOUT: 30000
-  DB_JOURNAL_MODE: WAL
-  DB_SYNCHRONOUS: NORMAL
-  SESSION_DRIVER: database
-  SESSION_LIFETIME: 43200
-  SESSION_ENCRYPT: false
-  SESSION_PATH: /
-  SESSION_DOMAIN: null
-  BROADCAST_CONNECTION: log
-  FILESYSTEM_DISK: local
-  QUEUE_CONNECTION: database
-  CACHE_STORE: database
-  MAIL_MAILER: log
-  MAIL_HOST: 127.0.0.1
-  MAIL_PORT: 2525
-  MAIL_FROM_ADDRESS: hello@example.com
-  MAIL_FROM_NAME: SMART TiLL
-  POS_CLOUD_BASE_URL: https://smart-till.app
-  NATIVEPHP_APP_ID: app.smart-till
-  NATIVEPHP_APP_AUTHOR: SMART DADDY
-  NATIVEPHP_APP_COPYRIGHT: "Copyright (c) 2026 Smart Till. All rights reserved."
-  NATIVEPHP_APP_DESCRIPTION: "A point of sale system built with Laravel and NativePHP."
-  NATIVEPHP_APP_WEBSITE: https://smart-till.app
-  NATIVEPHP_UPDATER_ENABLED: true
-  NATIVEPHP_UPDATER_PROVIDER: github
-  GITHUB_REPO: SMART-TiLL-POS
-  GITHUB_OWNER: byhussain
-  GITHUB_RELEASE_TYPE: release
-  GITHUB_V_PREFIXED_TAG_NAME: true
-  GITHUB_PRIVATE: false
-  GITHUB_CHANNEL: latest
-  GITHUB_TOKEN: ${{ secrets.NATIVEPHP_GITHUB_TOKEN }}
-  NATIVEPHP_RELEASE_NOTES: ${{ github.event.inputs.release_notes || '' }}
-  NATIVEPHP_APPLE_ID: ${{ secrets.NATIVEPHP_APPLE_ID }}
-  NATIVEPHP_APPLE_ID_PASS: ${{ secrets.NATIVEPHP_APPLE_ID_PASS }}
-  NATIVEPHP_APPLE_TEAM_ID: ${{ secrets.NATIVEPHP_APPLE_TEAM_ID }}
-  NATIVEPHP_APPLE_SIGNING_IDENTITY: ${{ secrets.NATIVEPHP_APPLE_SIGNING_IDENTITY }}
-
 jobs:
   publish:
     name: Publish All Platforms
     runs-on: macos-latest
+
+    env:
+      APP_NAME: SMART TiLL
+      APP_ENV: local
+      APP_DEBUG: true
+      APP_URL: http://localhost
+      APP_KEY: ${{ secrets.APP_KEY }}
+      APP_LOCALE: en
+      APP_FALLBACK_LOCALE: en
+      APP_FAKER_LOCALE: en_US
+      APP_MAINTENANCE_DRIVER: file
+      BCRYPT_ROUNDS: 12
+      LOG_CHANNEL: stack
+      LOG_STACK: single
+      LOG_DEPRECATIONS_CHANNEL: null
+      LOG_LEVEL: debug
+      DB_CONNECTION: sqlite
+      DB_BUSY_TIMEOUT: 30000
+      DB_JOURNAL_MODE: WAL
+      DB_SYNCHRONOUS: NORMAL
+      SESSION_DRIVER: database
+      SESSION_LIFETIME: 43200
+      SESSION_ENCRYPT: false
+      SESSION_PATH: /
+      SESSION_DOMAIN: null
+      BROADCAST_CONNECTION: log
+      FILESYSTEM_DISK: local
+      QUEUE_CONNECTION: database
+      CACHE_STORE: database
+      MAIL_MAILER: log
+      MAIL_HOST: 127.0.0.1
+      MAIL_PORT: 2525
+      MAIL_FROM_ADDRESS: hello@example.com
+      MAIL_FROM_NAME: SMART TiLL
+      POS_CLOUD_BASE_URL: https://smart-till.app
+      NATIVEPHP_APP_ID: app.smart-till
+      NATIVEPHP_APP_AUTHOR: SMART DADDY
+      NATIVEPHP_APP_COPYRIGHT: "Copyright (c) 2026 Smart Till. All rights reserved."
+      NATIVEPHP_APP_DESCRIPTION: "A point of sale system built with Laravel and NativePHP."
+      NATIVEPHP_APP_WEBSITE: https://smart-till.app
+      NATIVEPHP_UPDATER_ENABLED: true
+      NATIVEPHP_UPDATER_PROVIDER: github
+      GITHUB_REPO: SMART-TiLL-POS
+      GITHUB_OWNER: byhussain
+      GITHUB_RELEASE_TYPE: release
+      GITHUB_V_PREFIXED_TAG_NAME: true
+      GITHUB_PRIVATE: false
+      GITHUB_CHANNEL: latest
+      GITHUB_TOKEN: ${{ secrets.NATIVEPHP_GITHUB_TOKEN }}
+      NATIVEPHP_RELEASE_NOTES: ${{ github.event.inputs.release_notes || '' }}
+      NATIVEPHP_APPLE_ID: ${{ secrets.NATIVEPHP_APPLE_ID }}
+      NATIVEPHP_APPLE_ID_PASS: ${{ secrets.NATIVEPHP_APPLE_ID_PASS }}
+      NATIVEPHP_APPLE_TEAM_ID: ${{ secrets.NATIVEPHP_APPLE_TEAM_ID }}
+      NATIVEPHP_APPLE_SIGNING_IDENTITY: ${{ secrets.NATIVEPHP_APPLE_SIGNING_IDENTITY }}
 
     steps:
       - name: Checkout repository
