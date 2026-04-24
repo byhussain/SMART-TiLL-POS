@@ -169,7 +169,7 @@ return [
     ],
 
     'postbuild' => [
-        'php artisan native:core:install',
+        //
     ],
 
     /**
