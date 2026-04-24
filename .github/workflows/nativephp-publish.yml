@@ -1,126 +1,193 @@
-#name: NativePHP Publish Windows
-#
-#on:
-#  push:
-#    branches:
-#      - main
-#  workflow_dispatch:
-#
-#permissions:
-#  contents: write
-#
-#concurrency:
-#  group: nativephp-publish-${{ github.ref }}
-#  cancel-in-progress: true
-#
-#jobs:
-#  publish-windows:
-#    name: Publish Windows build
-#    runs-on: windows-latest
-#
-#    env:
-#      APP_ENV: production
-#      APP_DEBUG: false
-#      APP_URL: http://localhost
-#      APP_NAME: SMART TiLL
-#      APP_LOCALE: en
-#      APP_FALLBACK_LOCALE: en
-#      APP_FAKER_LOCALE: en_US
-#      APP_MAINTENANCE_DRIVER: file
-#      BCRYPT_ROUNDS: 12
-#      LOG_CHANNEL: stack
-#      LOG_STACK: single
-#      LOG_DEPRECATIONS_CHANNEL: null
-#      LOG_LEVEL: debug
-#      DB_CONNECTION: sqlite
-#      DB_DATABASE: ${{ github.workspace }}/database/database.sqlite
-#      SESSION_DRIVER: database
-#      SESSION_LIFETIME: 43200
-#      SESSION_ENCRYPT: false
-#      SESSION_PATH: /
-#      SESSION_DOMAIN: null
-#      BROADCAST_CONNECTION: log
-#      FILESYSTEM_DISK: local
-#      QUEUE_CONNECTION: database
-#      CACHE_STORE: database
-#      MEMCACHED_HOST: 127.0.0.1
-#      REDIS_CLIENT: phpredis
-#      REDIS_HOST: 127.0.0.1
-#      REDIS_PASSWORD: null
-#      REDIS_PORT: 6379
-#      MAIL_MAILER: log
-#      MAIL_SCHEME: null
-#      MAIL_HOST: 127.0.0.1
-#      MAIL_PORT: 2525
-#      MAIL_USERNAME: null
-#      MAIL_PASSWORD: null
-#      MAIL_FROM_ADDRESS: hello@example.com
-#      MAIL_FROM_NAME: SMART TiLL
-#      AWS_ACCESS_KEY_ID: ''
-#      AWS_SECRET_ACCESS_KEY: ''
-#      AWS_DEFAULT_REGION: us-east-1
-#      AWS_BUCKET: ''
-#      AWS_USE_PATH_STYLE_ENDPOINT: false
-#      VITE_APP_NAME: SMART TiLL
-#      POS_CLOUD_BASE_URL: https://smart-till.app
-#      NATIVEPHP_APP_ID: app.smart-till
-#      NATIVEPHP_APP_AUTHOR: SMART DADDY
-#      NATIVEPHP_APP_COPYRIGHT: Copyright (c) 2026 Smart Till. All rights reserved.
-#      NATIVEPHP_APP_DESCRIPTION: A point of sale system built with Laravel and NativePHP.
-#      NATIVEPHP_APP_WEBSITE: https://smart-till.app
-#      NATIVEPHP_UPDATER_ENABLED: true
-#      NATIVEPHP_UPDATER_PROVIDER: github
-#      GITHUB_REPO: SMART-TiLL-POS
-#      GITHUB_OWNER: hussain-sd
-#      GITHUB_RELEASE_TYPE: release
-#      GITHUB_V_PREFIXED_TAG_NAME: true
-#      GITHUB_PRIVATE: false
-#      GITHUB_CHANNEL: latest
-#      GITHUB_TOKEN: ${{ secrets.TOKEN }}
-#
-#    steps:
-#      - name: Checkout repository
-#        uses: actions/checkout@v4
-#        with:
-#          fetch-depth: 0
-#
-#      - name: Set up PHP
-#        uses: shivammathur/setup-php@v2
-#        with:
-#          php-version: '8.4'
-#          extensions: mbstring, intl, fileinfo, pdo_sqlite, sqlite3, zip
-#          tools: composer:v2
-#
-#      - name: Set up Node.js
-#        uses: actions/setup-node@v4
-#        with:
-#          node-version: '22'
-#          cache: npm
-#
-#      - name: Prepare environment
-#        shell: pwsh
-#        run: |
-#          Copy-Item .env.example .env -Force
-#          if (!(Test-Path database)) { New-Item -ItemType Directory -Path database | Out-Null }
-#          if (!(Test-Path database/database.sqlite)) { New-Item -ItemType File -Path database/database.sqlite | Out-Null }
-#
-#      - name: Install PHP dependencies
-#        run: composer install --no-interaction --prefer-dist --optimize-autoloader
-#
-#      - name: Generate app key
-#        run: php artisan key:generate --force
-#
-#      - name: Run database migrations
-#        run: php artisan migrate --force
-#
-#      - name: Install Node dependencies
-#        run: npm ci
-#
-#      - name: Build frontend assets
-#        run: npm run build
-#
-#      - name: Install NativePHP scaffolding
-#        run: php artisan native:install --publish --no-interaction
-#
-#      - name: Publish NativePHP release
-#        run: php artisan native:publish win --no-interaction
+name: NativePHP Publish
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: 'Release notes for this version'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nativephp-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_NAME: SMART TiLL
+  APP_ENV: production
+  APP_DEBUG: false
+  APP_URL: http://localhost
+  APP_KEY: ${{ secrets.APP_KEY }}
+  APP_LOCALE: en
+  APP_FALLBACK_LOCALE: en
+  APP_FAKER_LOCALE: en_US
+  APP_MAINTENANCE_DRIVER: file
+  BCRYPT_ROUNDS: 12
+  LOG_CHANNEL: stack
+  LOG_STACK: single
+  LOG_DEPRECATIONS_CHANNEL: null
+  LOG_LEVEL: debug
+  DB_CONNECTION: sqlite
+  DB_BUSY_TIMEOUT: 30000
+  DB_JOURNAL_MODE: WAL
+  DB_SYNCHRONOUS: NORMAL
+  SESSION_DRIVER: database
+  SESSION_LIFETIME: 43200
+  SESSION_ENCRYPT: false
+  SESSION_PATH: /
+  SESSION_DOMAIN: null
+  BROADCAST_CONNECTION: log
+  FILESYSTEM_DISK: local
+  QUEUE_CONNECTION: database
+  CACHE_STORE: database
+  MAIL_MAILER: log
+  MAIL_HOST: 127.0.0.1
+  MAIL_PORT: 2525
+  MAIL_FROM_ADDRESS: hello@example.com
+  MAIL_FROM_NAME: SMART TiLL
+  POS_CLOUD_BASE_URL: https://smart-till.app
+  NATIVEPHP_APP_ID: app.smart-till
+  NATIVEPHP_APP_AUTHOR: SMART DADDY
+  NATIVEPHP_APP_COPYRIGHT: "Copyright (c) 2026 Smart Till. All rights reserved."
+  NATIVEPHP_APP_DESCRIPTION: "A point of sale system built with Laravel and NativePHP."
+  NATIVEPHP_APP_WEBSITE: https://smart-till.app
+  NATIVEPHP_UPDATER_ENABLED: true
+  NATIVEPHP_UPDATER_PROVIDER: github
+  GITHUB_REPO: SMART-TiLL-POS
+  GITHUB_OWNER: byhussain
+  GITHUB_RELEASE_TYPE: release
+  GITHUB_V_PREFIXED_TAG_NAME: true
+  GITHUB_PRIVATE: false
+  GITHUB_CHANNEL: latest
+  GITHUB_TOKEN: ${{ secrets.NATIVEPHP_GITHUB_TOKEN }}
+  NATIVEPHP_RELEASE_NOTES: ${{ github.event.inputs.release_notes || '' }}
+  NATIVEPHP_APPLE_ID: ${{ secrets.NATIVEPHP_APPLE_ID }}
+  NATIVEPHP_APPLE_ID_PASS: ${{ secrets.NATIVEPHP_APPLE_ID_PASS }}
+  NATIVEPHP_APPLE_TEAM_ID: ${{ secrets.NATIVEPHP_APPLE_TEAM_ID }}
+  NATIVEPHP_APPLE_SIGNING_IDENTITY: ${{ secrets.NATIVEPHP_APPLE_SIGNING_IDENTITY }}
+
+jobs:
+  publish:
+    name: Publish All Platforms
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Import Apple Developer ID certificate into keychain
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o "$CERTIFICATE_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, intl, fileinfo, pdo_sqlite, sqlite3, zip
+          tools: composer:v2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      # ── Cache: Composer vendor directory ─────────────────────────────────────
+      - name: Cache Composer vendor
+        id: composer-cache
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: composer-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-
+
+      # ── Cache: Node modules ───────────────────────────────────────────────────
+      - name: Cache node_modules
+        id: node-cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-${{ hashFiles('package-lock.json') }}
+          restore-keys: node-
+
+      # ── Cache: NativePHP Electron node_modules ────────────────────────────────
+      - name: Cache NativePHP Electron node_modules
+        id: electron-node-cache
+        uses: actions/cache@v4
+        with:
+          path: nativephp/electron/node_modules
+          key: electron-node-${{ hashFiles('nativephp/electron/package-lock.json') }}
+          restore-keys: electron-node-
+
+      # ── Cache: Downloaded PHP binaries for all platforms ──────────────────────
+      - name: Cache NativePHP PHP binaries
+        uses: actions/cache@v4
+        with:
+          path: nativephp/electron/resources/php
+          key: nativephp-php-${{ hashFiles('nativephp/electron/php.js') }}
+          restore-keys: nativephp-php-
+
+      - name: Prepare environment
+        run: |
+          cp .env.example .env
+          mkdir -p database
+          touch database/database.sqlite
+
+      - name: Install PHP dependencies
+        if: steps.composer-cache.outputs.cache-hit != 'true'
+        run: composer install --no-interaction --prefer-dist --optimize-autoloader
+
+      - name: Install Node dependencies
+        if: steps.node-cache.outputs.cache-hit != 'true'
+        run: npm ci
+
+      - name: Install NativePHP Electron node_modules
+        if: steps.electron-node-cache.outputs.cache-hit != 'true'
+        working-directory: nativephp/electron
+        run: npm ci
+
+      - name: Build frontend assets
+        run: npm run build
+
+      - name: Install NativePHP
+        run: php artisan native:install --no-interaction
+
+      - name: Restore custom assets overwritten by native:install
+        run: git restore .
+
+      - name: Publish NativePHP for all platforms
+        run: php artisan native:publish all --no-interaction
+
+      - name: Clean up keychain
+        if: always()
+        run: |
+          security delete-keychain $RUNNER_TEMP/build.keychain || true
