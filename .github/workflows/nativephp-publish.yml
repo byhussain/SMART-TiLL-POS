@@ -33,9 +33,6 @@ jobs:
       NATIVEPHP_APPLE_SIGNING_IDENTITY: ${{ secrets.NATIVEPHP_APPLE_SIGNING_IDENTITY }}
       # ── Workflow-specific (dynamic, cannot live in .env.example) ─────────────
       NATIVEPHP_RELEASE_NOTES: ${{ github.event.inputs.release_notes || '' }}
-      # ── Electron download cache paths ─────────────────────────────────────────
-      ELECTRON_CACHE: ~/.cache/electron
-      ELECTRON_BUILDER_CACHE: ~/.cache/electron-builder
 
     steps:
       - name: Checkout repository
@@ -79,42 +76,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-          cache: npm
-
-      # ── Cache: Composer vendor directory ─────────────────────────────────────
-      - name: Cache Composer vendor
-        id: composer-cache
-        uses: actions/cache@v4
-        with:
-          path: vendor
-          key: composer-${{ hashFiles('composer.lock') }}
-          restore-keys: composer-
-
-      # ── Cache: Node modules ───────────────────────────────────────────────────
-      - name: Cache node_modules
-        id: node-cache
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: node-${{ hashFiles('package-lock.json') }}
-          restore-keys: node-
-
-      # ── Cache: NativePHP Electron node_modules ────────────────────────────────
-      - name: Cache NativePHP Electron node_modules
-        id: electron-node-cache
-        uses: actions/cache@v4
-        with:
-          path: nativephp/electron/node_modules
-          key: electron-node-${{ hashFiles('nativephp/electron/package-lock.json') }}
-          restore-keys: electron-node-
-
-      # ── Cache: Downloaded PHP binaries for all platforms ──────────────────────
-      - name: Cache NativePHP PHP binaries
-        uses: actions/cache@v4
-        with:
-          path: nativephp/electron/resources/php
-          key: nativephp-php-${{ hashFiles('nativephp/electron/php.js') }}
-          restore-keys: nativephp-php-
 
       - name: Prepare environment
         run: |
@@ -128,15 +89,12 @@ jobs:
           touch database/database.sqlite
 
       - name: Install PHP dependencies
-        if: steps.composer-cache.outputs.cache-hit != 'true'
         run: composer install --no-interaction --prefer-dist --optimize-autoloader
 
       - name: Install Node dependencies
-        if: steps.node-cache.outputs.cache-hit != 'true'
         run: npm ci
 
       - name: Install NativePHP Electron node_modules
-        if: steps.electron-node-cache.outputs.cache-hit != 'true'
         working-directory: nativephp/electron
         run: npm ci
 
