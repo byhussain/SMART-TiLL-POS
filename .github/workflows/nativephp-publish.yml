@@ -26,6 +26,7 @@ jobs:
     env:
       # ── Secrets (cannot live in .env.example) ────────────────────────────────
       APP_KEY: ${{ secrets.APP_KEY }}
+      LOG_SLACK_WEBHOOK_URL: ${{ secrets.LOG_SLACK_WEBHOOK_URL }}
       GITHUB_TOKEN: ${{ secrets.NATIVEPHP_GITHUB_TOKEN }}
       NATIVEPHP_APPLE_ID: ${{ secrets.NATIVEPHP_APPLE_ID }}
       NATIVEPHP_APPLE_ID_PASS: ${{ secrets.NATIVEPHP_APPLE_ID_PASS }}
@@ -83,6 +84,7 @@ jobs:
           php -r "
             \$env = file_get_contents('.env');
             \$env = preg_replace('/^APP_KEY=.*/m', 'APP_KEY=' . getenv('APP_KEY'), \$env);
+            \$env = preg_replace('/^LOG_SLACK_WEBHOOK_URL=.*/m', 'LOG_SLACK_WEBHOOK_URL=' . getenv('LOG_SLACK_WEBHOOK_URL'), \$env);
             file_put_contents('.env', \$env);
           "
           mkdir -p database
