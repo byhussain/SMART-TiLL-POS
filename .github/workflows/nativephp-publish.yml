@@ -19,12 +19,78 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  publish:
-    name: Publish All Platforms
+  publish-windows:
+    name: Publish Windows
+    runs-on: windows-latest
+
+    env:
+      APP_KEY: ${{ secrets.APP_KEY }}
+      LOG_SLACK_WEBHOOK_URL: ${{ secrets.LOG_SLACK_WEBHOOK_URL }}
+      GITHUB_TOKEN: ${{ secrets.NATIVEPHP_GITHUB_TOKEN }}
+      NATIVEPHP_RELEASE_NOTES: ${{ github.event.inputs.release_notes || '' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, intl, fileinfo, pdo_sqlite, sqlite3, zip
+          tools: composer:v2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Prepare environment
+        shell: bash
+        run: |
+          cp .env.example .env
+          php -r "
+            \$env = file_get_contents('.env');
+            \$env = preg_replace('/^APP_KEY=.*/m', 'APP_KEY=' . getenv('APP_KEY'), \$env);
+            \$env = preg_replace('/^LOG_SLACK_WEBHOOK_URL=.*/m', 'LOG_SLACK_WEBHOOK_URL=' . getenv('LOG_SLACK_WEBHOOK_URL'), \$env);
+            file_put_contents('.env', \$env);
+          "
+          mkdir -p database
+          touch database/database.sqlite
+
+      - name: Install PHP dependencies
+        run: composer install --no-interaction --prefer-dist --optimize-autoloader
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Install NativePHP Electron node_modules
+        working-directory: nativephp/electron
+        run: npm ci
+
+      - name: Build frontend assets
+        run: npm run build
+
+      - name: Install NativePHP
+        run: php artisan native:install --publish --no-interaction
+
+      - name: Restore customised files overwritten by native:install
+        shell: bash
+        run: |
+          git restore nativephp/electron/build/icon.png
+          git restore nativephp/electron/electron-builder.mjs
+          git restore nativephp/electron/package.json
+
+      - name: Publish NativePHP for Windows
+        run: php artisan native:publish win --no-interaction
+
+  publish-macos:
+    name: Publish macOS
     runs-on: macos-latest
 
     env:
-      # ── Secrets (cannot live in .env.example) ────────────────────────────────
       APP_KEY: ${{ secrets.APP_KEY }}
       LOG_SLACK_WEBHOOK_URL: ${{ secrets.LOG_SLACK_WEBHOOK_URL }}
       GITHUB_TOKEN: ${{ secrets.NATIVEPHP_GITHUB_TOKEN }}
@@ -32,7 +98,6 @@ jobs:
       NATIVEPHP_APPLE_ID_PASS: ${{ secrets.NATIVEPHP_APPLE_ID_PASS }}
       NATIVEPHP_APPLE_TEAM_ID: ${{ secrets.NATIVEPHP_APPLE_TEAM_ID }}
       NATIVEPHP_APPLE_SIGNING_IDENTITY: ${{ secrets.NATIVEPHP_APPLE_SIGNING_IDENTITY }}
-      # ── Workflow-specific (dynamic, cannot live in .env.example) ─────────────
       NATIVEPHP_RELEASE_NOTES: ${{ github.event.inputs.release_notes || '' }}
 
     steps:
@@ -112,10 +177,87 @@ jobs:
           git restore nativephp/electron/electron-builder.mjs
           git restore nativephp/electron/package.json
 
-      - name: Publish NativePHP for all platforms
-        run: php artisan native:publish all --no-interaction
+      - name: Publish NativePHP for macOS
+        run: php artisan native:publish mac --no-interaction
 
       - name: Clean up keychain
         if: always()
         run: |
           security delete-keychain $RUNNER_TEMP/build.keychain || true
+
+  publish-linux:
+    name: Publish Linux
+    runs-on: ubuntu-latest
+
+    env:
+      APP_KEY: ${{ secrets.APP_KEY }}
+      LOG_SLACK_WEBHOOK_URL: ${{ secrets.LOG_SLACK_WEBHOOK_URL }}
+      GITHUB_TOKEN: ${{ secrets.NATIVEPHP_GITHUB_TOKEN }}
+      NATIVEPHP_RELEASE_NOTES: ${{ github.event.inputs.release_notes || '' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libnotify-dev \
+            libnss3 \
+            libxss1 \
+            libasound2t64 \
+            libxtst6 \
+            xvfb
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, intl, fileinfo, pdo_sqlite, sqlite3, zip
+          tools: composer:v2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Prepare environment
+        run: |
+          cp .env.example .env
+          php -r "
+            \$env = file_get_contents('.env');
+            \$env = preg_replace('/^APP_KEY=.*/m', 'APP_KEY=' . getenv('APP_KEY'), \$env);
+            \$env = preg_replace('/^LOG_SLACK_WEBHOOK_URL=.*/m', 'LOG_SLACK_WEBHOOK_URL=' . getenv('LOG_SLACK_WEBHOOK_URL'), \$env);
+            file_put_contents('.env', \$env);
+          "
+          mkdir -p database
+          touch database/database.sqlite
+
+      - name: Install PHP dependencies
+        run: composer install --no-interaction --prefer-dist --optimize-autoloader
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Install NativePHP Electron node_modules
+        working-directory: nativephp/electron
+        run: npm ci
+
+      - name: Build frontend assets
+        run: npm run build
+
+      - name: Install NativePHP
+        run: php artisan native:install --publish --no-interaction
+
+      - name: Restore customised files overwritten by native:install
+        run: |
+          git restore nativephp/electron/build/icon.png
+          git restore nativephp/electron/electron-builder.mjs
+          git restore nativephp/electron/package.json
+
+      - name: Publish NativePHP for Linux
+        run: php artisan native:publish linux --no-interaction
