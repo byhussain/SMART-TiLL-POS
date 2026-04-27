@@ -19,7 +19,7 @@ class LogViewer extends Page
 
     private const DEBUG_LEVELS = ['debug'];
 
-    protected static string $view = 'filament.store.pages.log-viewer';
+    protected string $view = 'filament.store.pages.log-viewer';
 
     protected static bool $shouldRegisterNavigation = false;
 
