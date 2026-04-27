@@ -100,6 +100,10 @@ class StorePanelProvider extends PanelProvider
             ->renderHook(
                 PanelsRenderHook::GLOBAL_SEARCH_BEFORE,
                 fn (): View => view('filament.store.partials.cloud-sync-status'),
+            )
+            ->renderHook(
+                PanelsRenderHook::BODY_END,
+                fn (): View => view('filament.store.partials.log-viewer-shortcut'),
             );
     }
 }
