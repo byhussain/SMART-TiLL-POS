@@ -1,3 +1,82 @@
+# SMART TiLL POS — Agent Guidelines
+
+## What This Repo Is
+
+**SMART-TiLL-POS** is the **desktop offline Point of Sale application** — a NativePHP + Laravel + Filament app that runs locally on a cashier's machine. It works fully offline (SQLite) and syncs with the SMART-TiLL server when an internet connection is available.
+
+**Role in the architecture:**
+- Desktop app built with NativePHP (Electron wrapper around a local Laravel app)
+- Runs entirely offline — SQLite database, no cloud dependency during operation
+- Syncs data to/from SMART-TiLL (server) when online
+- Handles sales, payments, receipts, and POS-specific workflows
+
+**Sibling repos:**
+| Repo | Role |
+|---|---|
+| `../SMART-TiLL` | Server-side cloud app (MySQL, APIs, admin panel) |
+| `../SMART-TILL-MOBILE` | Flutter mobile app |
+| `../core` | Shared Laravel package — models, Filament resources, observers, services |
+
+---
+
+## ⚠️ Core Package Rules — Read This Before Touching Anything
+
+This app consumes the **`smart-till/core`** package (`../core`). A large portion of models, Filament resources, observers, and services live in `core`, not in this repo's `app/` directory.
+
+### Before fixing any issue
+
+1. **Read the issue fully.** Understand exactly what is broken and where it lives — in this app or in the core package.
+2. **Trace the code path.** Check whether the broken class, method, or Filament component is in `app/` (this repo) or in `vendor/smart-till/core` (which means it really lives in `../core/src/`).
+3. **Never edit files inside `vendor/`.** `vendor/` is ignored by git and overwritten by `composer install`. Any fix there will be lost permanently.
+
+### Where to fix
+
+| The broken code is in… | Fix it in… |
+|---|---|
+| `app/`, `routes/`, `config/`, `resources/` of this repo | This repo (`SMART-TiLL-POS`) |
+| `vendor/smart-till/core/src/` | **`../core/src/`** — the actual source of truth |
+| A third-party package in `vendor/` | Do not modify it — raise the issue or find a workaround |
+
+### After fixing in core
+
+When a fix is made in `../core`, tests for that fix belong in **`../core/tests/`** only — that is the home of all core logic tests. Do not write core-related tests in this repo's `tests/` directory.
+
+---
+
+## ⚠️ Test Enforcement — Non-Negotiable
+
+**Every change — in this repo or in core — requires a test. No exceptions.**
+
+- New feature → write a feature test
+- Bug fix → write a test that would have caught the bug
+- Refactor → existing tests must still pass; add new ones if behaviour changes
+- Removed code → remove or update the tests that covered it
+
+Do not consider any task complete until `php artisan test --compact` passes with all tests green.
+
+```bash
+# Run all tests
+php artisan test --compact
+
+# Run a specific file
+php artisan test --compact tests/Feature/SomeFeatureTest.php
+
+# Filter by name
+php artisan test --compact --filter="some feature"
+```
+
+---
+
+## This App's Specific Concerns
+
+- **Offline-first** — never assume network availability. All core POS operations (sales, payments, receipts) must work without a server connection.
+- **SQLite** — the local database is SQLite, not MySQL. Migrations and queries must be SQLite-compatible. Do not use MySQL-specific syntax.
+- **NativePHP** — this is a desktop app. Be aware of NativePHP's constraints around file paths, storage, and native OS APIs.
+- **Sync** — data sync with SMART-TiLL happens in the background when online. Sync logic is sensitive — test it carefully and do not break offline behaviour when modifying sync code.
+- **No Horizon / Nightwatch / Telescope** — these server-side packages are not installed here. Do not reference them.
+
+---
+
 <laravel-boost-guidelines>
 === foundation rules ===
 
