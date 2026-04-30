@@ -5,11 +5,6 @@ on:
     branches:
       - main
   workflow_dispatch:
-    inputs:
-      release_notes:
-        description: 'Release notes for this version'
-        required: false
-        default: ''
 
 permissions:
   contents: write
@@ -27,7 +22,6 @@ jobs:
       APP_KEY: ${{ secrets.APP_KEY }}
       LOG_SLACK_WEBHOOK_URL: ${{ secrets.LOG_SLACK_WEBHOOK_URL }}
       GITHUB_TOKEN: ${{ secrets.NATIVEPHP_GITHUB_TOKEN }}
-      NATIVEPHP_RELEASE_NOTES: ${{ github.event.inputs.release_notes || '' }}
 
     steps:
       - name: Checkout repository
@@ -98,7 +92,6 @@ jobs:
       NATIVEPHP_APPLE_ID_PASS: ${{ secrets.NATIVEPHP_APPLE_ID_PASS }}
       NATIVEPHP_APPLE_TEAM_ID: ${{ secrets.NATIVEPHP_APPLE_TEAM_ID }}
       NATIVEPHP_APPLE_SIGNING_IDENTITY: ${{ secrets.NATIVEPHP_APPLE_SIGNING_IDENTITY }}
-      NATIVEPHP_RELEASE_NOTES: ${{ github.event.inputs.release_notes || '' }}
 
     steps:
       - name: Checkout repository
@@ -193,7 +186,6 @@ jobs:
       APP_KEY: ${{ secrets.APP_KEY }}
       LOG_SLACK_WEBHOOK_URL: ${{ secrets.LOG_SLACK_WEBHOOK_URL }}
       GITHUB_TOKEN: ${{ secrets.NATIVEPHP_GITHUB_TOKEN }}
-      NATIVEPHP_RELEASE_NOTES: ${{ github.event.inputs.release_notes || '' }}
 
     steps:
       - name: Checkout repository
@@ -270,7 +262,6 @@ jobs:
       APP_KEY: ${{ secrets.APP_KEY }}
       LOG_SLACK_WEBHOOK_URL: ${{ secrets.LOG_SLACK_WEBHOOK_URL }}
       GITHUB_TOKEN: ${{ secrets.NATIVEPHP_GITHUB_TOKEN }}
-      NATIVEPHP_RELEASE_NOTES: ${{ github.event.inputs.release_notes || '' }}
 
     steps:
       - name: Checkout repository
