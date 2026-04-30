@@ -12,6 +12,7 @@ const appCopyright = process.env.NATIVEPHP_APP_COPYRIGHT;
 const deepLinkProtocol = process.env.NATIVEPHP_DEEPLINK_SCHEME;
 const updaterEnabled = process.env.NATIVEPHP_UPDATER_ENABLED === 'true';
 const releaseNotes = process.env.NATIVEPHP_RELEASE_NOTES || null;
+const deleteAppDataOnUninstall = process.env.NATIVEPHP_DELETE_APP_DATA_ON_UNINSTALL === 'true';
 
 // Azure signing configuration
 const azureEndpoint = process.env.NATIVEPHP_AZURE_ENDPOINT;
