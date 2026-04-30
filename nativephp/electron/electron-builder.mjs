@@ -119,7 +119,10 @@ export default {
         artifactName: fileName + '-${version}-${arch}.${ext}',
     },
     linux: {
-        target: ['AppImage', 'deb'],
+        target: [
+            { target: 'AppImage', arch: ['x64'] },
+            { target: 'deb', arch: ['x64', 'arm64'] },
+        ],
         maintainer: appUrl,
         category: 'Utility',
     },
