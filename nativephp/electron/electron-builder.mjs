@@ -42,7 +42,7 @@ let updaterConfig = {};
 try {
     updaterConfig = process.env.NATIVEPHP_UPDATER_CONFIG;
     updaterConfig = JSON.parse(updaterConfig);
-} catch (e) {
+} catch {
     updaterConfig = {};
 }
 
@@ -69,7 +69,7 @@ export default {
     beforePack: async (context) => {
         let arch = {
             1: 'x64',
-            3: 'arm64'
+            3: 'arm64',
         }[context.arch];
 
         if (arch === undefined) {
@@ -83,19 +83,22 @@ export default {
     afterSign: 'build/notarize.js',
     win: {
         executableName: fileName,
-        ...(azureEndpoint && azureCertificateProfileName && azureCodeSigningAccountName ? {
-            azureSignOptions: {
-                endpoint: azureEndpoint,
-                certificateProfileName: azureCertificateProfileName,
-                codeSigningAccountName: azureCodeSigningAccountName
+        ...(azureEndpoint && azureCertificateProfileName && azureCodeSigningAccountName
+            ? {
+                azureSignOptions: {
+                    endpoint: azureEndpoint,
+                    certificateProfileName: azureCertificateProfileName,
+                    codeSigningAccountName: azureCodeSigningAccountName
+                },
             }
-        } : {}),
+            : {}),
     },
     nsis: {
         artifactName: appName + '-${version}-setup.${ext}',
         shortcutName: '${productName}',
         uninstallDisplayName: '${productName}',
         createDesktopShortcut: 'always',
+        deleteAppDataOnUninstall: deleteAppDataOnUninstall,
     },
     protocols: {
         name: deepLinkProtocol,
@@ -104,17 +107,11 @@ export default {
     mac: {
         entitlementsInherit: 'build/entitlements.mac.plist',
         artifactName: appName + '-${version}-${arch}.${ext}',
-        type: 'distribution',
-        identity: process.env.NATIVEPHP_APPLE_SIGNING_IDENTITY || undefined,
         extendInfo: {
-            NSCameraUsageDescription:
-                "Application requests access to the device's camera.",
-            NSMicrophoneUsageDescription:
-                "Application requests access to the device's microphone.",
-            NSDocumentsFolderUsageDescription:
-                "Application requests access to the user's Documents folder.",
-            NSDownloadsFolderUsageDescription:
-                "Application requests access to the user's Downloads folder.",
+            NSCameraUsageDescription: "Application requests access to the device's camera.",
+            NSMicrophoneUsageDescription: "Application requests access to the device's microphone.",
+            NSDocumentsFolderUsageDescription: "Application requests access to the user's Documents folder.",
+            NSDownloadsFolderUsageDescription: "Application requests access to the user's Downloads folder.",
         },
     },
     dmg: {
@@ -139,20 +136,15 @@ export default {
         {
             from: process.env.NATIVEPHP_BUILD_PATH,
             to: 'build',
-            filter: [
-                '**/*',
-                '!{.git}',
-            ]
-        }
+            filter: ['**/*', '!{.git}'],
+        },
     ],
     extraFiles: [
         {
             from: join(process.env.APP_PATH, 'extras'),
             to: 'extras',
-            filter: [
-                '**/*'
-            ]
-        }
+            filter: ['**/*'],
+        },
     ],
     ...updaterEnabled
         ? {

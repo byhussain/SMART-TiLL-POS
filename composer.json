@@ -13,7 +13,7 @@
         "filament/filament": "^5.0",
         "laravel/framework": "^13.0",
         "laravel/tinker": "^3.0",
-        "nativephp/desktop": "dev-main",
+        "nativephp/desktop": "^2.2",
         "smart-till/core": "^1.1"
     },
     "require-dev": {
@@ -96,6 +96,6 @@
             "php-http/discovery": true
         }
     },
-    "minimum-stability": "dev",
+    "minimum-stability": "stable",
     "prefer-stable": true
 }
