@@ -95,7 +95,7 @@ export default {
             : {}),
     },
     nsis: {
-        artifactName: fileName + '-${version}-setup.${ext}',
+        artifactName: appName + '-${version}-setup.${ext}',
         shortcutName: '${productName}',
         uninstallDisplayName: '${productName}',
         createDesktopShortcut: 'always',
@@ -107,7 +107,7 @@ export default {
     },
     mac: {
         entitlementsInherit: 'build/entitlements.mac.plist',
-        artifactName: fileName + '-${version}-${arch}.${ext}',
+        artifactName: appName + '-${version}-${arch}.${ext}',
         extendInfo: {
             NSCameraUsageDescription: "Application requests access to the device's camera.",
             NSMicrophoneUsageDescription: "Application requests access to the device's microphone.",
@@ -116,18 +116,15 @@ export default {
         },
     },
     dmg: {
-        artifactName: fileName + '-${version}-${arch}.${ext}',
+        artifactName: appName + '-${version}-${arch}.${ext}',
     },
     linux: {
-        target: [
-            { target: 'AppImage', arch: ['x64'] },
-            { target: 'deb', arch: ['x64', 'arm64'] },
-        ],
+        target: ['AppImage', 'deb'],
         maintainer: appUrl,
         category: 'Utility',
     },
     appImage: {
-        artifactName: fileName + '-${version}.${ext}',
+        artifactName: appName + '-${version}.${ext}',
     },
     npmRebuild: false,
     extraMetadata: {
