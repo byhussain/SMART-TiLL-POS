@@ -4,8 +4,6 @@ namespace App\Providers;
 
 use App\Observers\DispatchCloudSyncObserver;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
 use SmartTill\Core\Models\Attribute;
 use SmartTill\Core\Models\Brand;
@@ -50,29 +48,6 @@ class AppServiceProvider extends ServiceProvider
             }
         }
 
-        Sale::creating(function (Sale $sale): void {
-            if (trim((string) ($sale->reference ?? '')) !== '') {
-                return;
-            }
-
-            if (! Schema::hasTable('sales') || ! Schema::hasColumn('sales', 'reference')) {
-                return;
-            }
-
-            $storeId = (int) ($sale->store_id ?? 0);
-            if ($storeId <= 0) {
-                return;
-            }
-
-            $nextReference = (int) DB::table('sales')
-                ->where('store_id', $storeId)
-                ->whereNotNull('reference')
-                ->pluck('reference')
-                ->map(static fn ($value): int => (int) $value)
-                ->max() + 1;
-
-            $sale->reference = (string) $nextReference;
-        });
     }
 
     /**
