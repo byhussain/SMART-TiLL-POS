@@ -1,6 +1,6 @@
 {
     "name": "smart-till",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "description": "A point of sale system built with Laravel and NativePHP.",
     "main": "./out/main/index.js",
     "author": "SMART DADDY",

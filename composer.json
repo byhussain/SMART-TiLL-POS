@@ -14,7 +14,7 @@
         "laravel/framework": "^13.0",
         "laravel/tinker": "^3.0",
         "nativephp/desktop": "^2.2",
-        "smart-till/core": "^1.1"
+        "smart-till/core": "dev-dev"
     },
     "require-dev": {
         "fakerphp/faker": "^1.23",
