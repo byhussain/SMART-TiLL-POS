@@ -261,13 +261,17 @@ class CloudSyncService
         $moduleByResource = $this->moduleKeyByResource();
         $errorRecords = [];
 
-        foreach (Schema::getTableListing() as $listedTable) {
+        // Only iterate tables that we actually sync (PULL_ORDER) instead of every table
+        // in the schema. The previous implementation called Schema::getTableListing()
+        // followed by Schema::hasColumn() on each, which fires dozens of pragma_table_info
+        // queries on every page load — devastating on Windows SQLite.
+        foreach (self::PULL_ORDER as $listedTable) {
             $table = $this->normalizeListedTableName((string) $listedTable);
             if ($table === '') {
                 continue;
             }
 
-            if (! Schema::hasColumn($table, 'sync_error')) {
+            if (! Schema::hasTable($table) || ! Schema::hasColumn($table, 'sync_error')) {
                 continue;
             }
 
@@ -401,9 +405,10 @@ class CloudSyncService
                 }
             });
 
-        foreach (Schema::getTableListing() as $listedTable) {
+        // Iterate only known sync resources (see getSyncErrorOverview for rationale).
+        foreach (self::PULL_ORDER as $listedTable) {
             $table = $this->normalizeListedTableName((string) $listedTable);
-            if ($table === '' || ! Schema::hasColumn($table, 'sync_error') || ! $this->canScopeTableToStore($table)) {
+            if ($table === '' || ! Schema::hasTable($table) || ! Schema::hasColumn($table, 'sync_error') || ! $this->canScopeTableToStore($table)) {
                 continue;
             }
 

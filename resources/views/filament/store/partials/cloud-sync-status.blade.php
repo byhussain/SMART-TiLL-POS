@@ -6,70 +6,81 @@
         && filled($runtimeState->cloud_base_url)
         && filled($runtimeState->cloud_token);
 
+    // Offline / guest mode: skip ALL the expensive sync overview queries.
+    // These run on every page load and dominate render time when the device
+    // is offline (the whole feature is irrelevant in that case).
     $hasSyncQueueActivity = false;
     $hasSyncQueueFailures = false;
-
-    if (\Illuminate\Support\Facades\Schema::hasTable('jobs')) {
-        $hasSyncQueueActivity = \Illuminate\Support\Facades\DB::table('jobs')
-            ->where('payload', 'like', '%SyncCloudStoreData%')
-            ->exists();
-    }
-
-    $cloudSyncService = app(\App\Services\CloudSyncService::class);
-    $activeStoreId = (int) ($runtimeState->active_store_id ?? 0);
-    $syncErrorOverview = $cloudSyncService->getSyncErrorOverview($activeStoreId);
-    $outboxErrorOverview = $cloudSyncService->getOutboxErrorOverviewForStore($activeStoreId);
-    $moduleSyncErrors = $syncErrorOverview['module_errors'] ?? [];
-    $errorRecords = collect($syncErrorOverview['error_records'] ?? []);
-    $outboxErrorRecords = collect($outboxErrorOverview['records'] ?? []);
-    $outboxFailedCount = (int) ($outboxErrorOverview['total_failed'] ?? 0);
-
+    $moduleSyncErrors = [];
+    $errorRecords = collect();
+    $outboxErrorRecords = collect();
+    $outboxFailedCount = 0;
     $recentJobErrors = collect();
-    if (\Illuminate\Support\Facades\Schema::hasTable('failed_jobs')) {
-        $isFailedJobForActiveStore = function (mixed $payload, int $storeId): bool {
-            if (! is_string($payload) || $storeId <= 0) {
-                return false;
-            }
-
-            $commandPayload = $payload;
-            $decodedPayload = json_decode($payload, true);
-            if (is_array($decodedPayload)) {
-                $decodedCommand = data_get($decodedPayload, 'data.command');
-                if (is_string($decodedCommand) && $decodedCommand !== '') {
-                    $commandPayload = $decodedCommand;
-                }
-            }
-
-            return preg_match('/s:7:"storeId";i:(\d+);/', $commandPayload, $matches) === 1
-                && (int) ($matches[1] ?? 0) === $storeId;
-        };
-
-        $recentJobErrors = \Illuminate\Support\Facades\DB::table('failed_jobs')
-            ->where('payload', 'like', '%SyncCloudStoreData%')
-            ->orderByDesc('id')
-            ->limit(50)
-            ->get(['id', 'payload', 'exception', 'failed_at'])
-            ->filter(fn ($job): bool => $isFailedJobForActiveStore($job->payload ?? null, $activeStoreId))
-            ->take(3)
-            ->values();
-
-        $hasSyncQueueFailures = $recentJobErrors->isNotEmpty();
-    }
-
-    $hasSyncError = (bool) ($syncErrorOverview['has_sync_errors'] ?? false) || $outboxFailedCount > 0 || $hasSyncQueueFailures;
+    $hasSyncError = false;
+    $moduleDefinitions = [];
+    $moduleStats = [];
     $bootstrapStatus = (string) ($runtimeState->bootstrap_status ?? 'not_started');
     $bootstrapProgressPercent = (int) ($runtimeState->bootstrap_progress_percent ?? 0);
     $bootstrapProgressLabel = (string) ($runtimeState->bootstrap_progress_label ?? '');
     $isBootstrapping = in_array($bootstrapStatus, ['downloading', 'installing'], true);
-    $isSyncing = ! $hasSyncError && $hasSyncQueueActivity && ! $isBootstrapping;
-
+    $isSyncing = false;
     $iconColorClass = 'text-red-600';
-    if ($isCloudConnected) {
-        $iconColorClass = $hasSyncError ? 'text-red-600' : (($isSyncing || $isBootstrapping) ? 'text-amber-500' : 'text-emerald-600');
-    }
 
-    $moduleDefinitions = $cloudSyncService->getSyncModules();
-    $moduleStats = $cloudSyncService->getModuleStats((int) ($runtimeState->active_store_id ?? 0));
+    if ($isCloudConnected) {
+        $cloudSyncService = app(\App\Services\CloudSyncService::class);
+        $activeStoreId = (int) ($runtimeState->active_store_id ?? 0);
+
+        if (\Illuminate\Support\Facades\Schema::hasTable('jobs')) {
+            $hasSyncQueueActivity = \Illuminate\Support\Facades\DB::table('jobs')
+                ->where('payload', 'like', '%SyncCloudStoreData%')
+                ->exists();
+        }
+
+        $syncErrorOverview = $cloudSyncService->getSyncErrorOverview($activeStoreId);
+        $outboxErrorOverview = $cloudSyncService->getOutboxErrorOverviewForStore($activeStoreId);
+        $moduleSyncErrors = $syncErrorOverview['module_errors'] ?? [];
+        $errorRecords = collect($syncErrorOverview['error_records'] ?? []);
+        $outboxErrorRecords = collect($outboxErrorOverview['records'] ?? []);
+        $outboxFailedCount = (int) ($outboxErrorOverview['total_failed'] ?? 0);
+
+        if (\Illuminate\Support\Facades\Schema::hasTable('failed_jobs')) {
+            $isFailedJobForActiveStore = function (mixed $payload, int $storeId): bool {
+                if (! is_string($payload) || $storeId <= 0) {
+                    return false;
+                }
+
+                $commandPayload = $payload;
+                $decodedPayload = json_decode($payload, true);
+                if (is_array($decodedPayload)) {
+                    $decodedCommand = data_get($decodedPayload, 'data.command');
+                    if (is_string($decodedCommand) && $decodedCommand !== '') {
+                        $commandPayload = $decodedCommand;
+                    }
+                }
+
+                return preg_match('/s:7:"storeId";i:(\d+);/', $commandPayload, $matches) === 1
+                    && (int) ($matches[1] ?? 0) === $storeId;
+            };
+
+            $recentJobErrors = \Illuminate\Support\Facades\DB::table('failed_jobs')
+                ->where('payload', 'like', '%SyncCloudStoreData%')
+                ->orderByDesc('id')
+                ->limit(50)
+                ->get(['id', 'payload', 'exception', 'failed_at'])
+                ->filter(fn ($job): bool => $isFailedJobForActiveStore($job->payload ?? null, $activeStoreId))
+                ->take(3)
+                ->values();
+
+            $hasSyncQueueFailures = $recentJobErrors->isNotEmpty();
+        }
+
+        $hasSyncError = (bool) ($syncErrorOverview['has_sync_errors'] ?? false) || $outboxFailedCount > 0 || $hasSyncQueueFailures;
+        $isSyncing = ! $hasSyncError && $hasSyncQueueActivity && ! $isBootstrapping;
+        $iconColorClass = $hasSyncError ? 'text-red-600' : (($isSyncing || $isBootstrapping) ? 'text-amber-500' : 'text-emerald-600');
+
+        $moduleDefinitions = $cloudSyncService->getSyncModules();
+        $moduleStats = $cloudSyncService->getModuleStats($activeStoreId);
+    }
 @endphp
 
 <div
@@ -109,11 +120,23 @@
                 }, autoHideMs);
             }
         },
+        isCloudConnected: @js($isCloudConnected),
         init() {
+            // Skip polling entirely in offline / guest mode — there is nothing to sync
+            // and each fetch would otherwise add overhead on every page (and try the
+            // network in NativePHP).
+            if (!this.isCloudConnected) {
+                return;
+            }
             this.pollSyncStatus();
-            this.pollTimer = window.setInterval(() => this.pollSyncStatus(), 3000);
+            // 15s instead of 3s — sync status barely changes second-to-second and
+            // each poll re-runs heavy DB queries server-side.
+            this.pollTimer = window.setInterval(() => this.pollSyncStatus(), 15000);
         },
         async pollSyncStatus() {
+            if (!this.isCloudConnected) {
+                return;
+            }
             try {
                 const response = await fetch(@js(route('startup.cloud.sync-status')), {
                     method: 'GET',

@@ -94,7 +94,9 @@ class StorePanelProvider extends PanelProvider
             ->tenantMiddleware([
                 CoreSetTenantTimezone::class,
             ], isPersistent: true)
-            ->databaseNotifications(isLazy: false)
+            // Lazy-load notifications so they don't run a query on every page render,
+            // and disable polling — this is an offline POS, push channels are not used.
+            ->databaseNotifications(isLazy: true)
             ->databaseNotificationsPolling(null)
             ->spa()
             ->renderHook(
