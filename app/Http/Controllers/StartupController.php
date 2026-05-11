@@ -154,7 +154,7 @@ class StartupController extends Controller
 
     public function cloudLogin(Request $request): JsonResponse
     {
-        $baseUrl = $this->resolveCloudBaseUrl();
+        $baseUrl = $this->resolveCloudBaseUrl() ?? $this->resolveCloudBaseUrlFromRequest($request);
         if (! $baseUrl) {
             return $this->respondCloudError($request, 'Cloud server URL is not configured.');
         }
@@ -203,7 +203,7 @@ class StartupController extends Controller
 
     public function cloudRegister(Request $request): JsonResponse
     {
-        $baseUrl = $this->resolveCloudBaseUrl();
+        $baseUrl = $this->resolveCloudBaseUrl() ?? $this->resolveCloudBaseUrlFromRequest($request);
         if (! $baseUrl) {
             return $this->respondCloudError($request, 'Cloud server URL is not configured.');
         }
@@ -652,6 +652,22 @@ class StartupController extends Controller
         }
 
         return null;
+    }
+
+    private function resolveCloudBaseUrlFromRequest(Request $request): ?string
+    {
+        $url = trim((string) $request->input('server_url', ''));
+        if ($url === '') {
+            return null;
+        }
+
+        $url = rtrim($url, '/');
+
+        if (! filter_var($url, FILTER_VALIDATE_URL)) {
+            return null;
+        }
+
+        return $url;
     }
 
     private function resolveCloudErrorMessage(mixed $payload, string $fallback): string

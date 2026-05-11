@@ -62,18 +62,271 @@
 
             <div class="p-8 sm:p-10">
                 <div class="mx-auto w-full max-w-xl">
-                    <div class="rounded-2xl border border-slate-300 bg-white/80 p-5 dark:border-white/15 dark:bg-white/5">
-                        <div class="flex min-h-64 flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-slate-50/80 px-6 text-center dark:border-white/15 dark:bg-slate-900/40">
-                            <span class="text-lg font-semibold text-slate-700 dark:text-slate-100">Cloud Login Coming Soon</span>
-                            <p class="mt-3 max-w-sm text-sm text-slate-500 dark:text-slate-300">
-                                Desktop cloud authentication and store sync setup will be available in a future release.
-                            </p>
-                        </div>
+
+                    {{-- Error container --}}
+                    <div data-cloud-error class="mb-5 hidden rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-700 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300"></div>
+
+                    {{-- Tab switcher --}}
+                    <div class="flex rounded-xl border border-slate-200 bg-slate-100 p-1 dark:border-white/10 dark:bg-white/5">
+                        <button
+                            data-tab="login"
+                            type="button"
+                            class="flex-1 rounded-lg px-4 py-2 text-sm font-medium transition"
+                            data-active-class="bg-white text-slate-900 shadow dark:bg-slate-800 dark:text-white"
+                            data-inactive-class="text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
+                        >
+                            Login
+                        </button>
+                        <button
+                            data-tab="register"
+                            type="button"
+                            class="flex-1 rounded-lg px-4 py-2 text-sm font-medium transition"
+                            data-active-class="bg-white text-slate-900 shadow dark:bg-slate-800 dark:text-white"
+                            data-inactive-class="text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
+                        >
+                            Register
+                        </button>
                     </div>
+
+                    {{-- Server URL field (only shown when not pre-configured) --}}
+                    @if (! $baseUrl)
+                        <div class="mt-5">
+                            <label for="server_url" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Server URL</label>
+                            <input
+                                type="url"
+                                id="server_url"
+                                name="server_url"
+                                placeholder="https://your-smart-till-server.com"
+                                required
+                                class="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-white/15 dark:bg-white/5 dark:text-white dark:placeholder-slate-500 dark:focus:border-blue-400"
+                            />
+                        </div>
+                    @endif
+
+                    {{-- Login form --}}
+                    <form data-form="login" class="mt-5 space-y-4">
+                        @csrf
+                        <div>
+                            <label for="login_email" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Email</label>
+                            <input
+                                type="email"
+                                id="login_email"
+                                name="email"
+                                autocomplete="email"
+                                required
+                                class="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-white/15 dark:bg-white/5 dark:text-white dark:placeholder-slate-500 dark:focus:border-blue-400"
+                            />
+                        </div>
+                        <div>
+                            <label for="login_password" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Password</label>
+                            <input
+                                type="password"
+                                id="login_password"
+                                name="password"
+                                autocomplete="current-password"
+                                required
+                                class="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-white/15 dark:bg-white/5 dark:text-white dark:placeholder-slate-500 dark:focus:border-blue-400"
+                            />
+                        </div>
+                        <button
+                            type="submit"
+                            data-submit
+                            class="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:opacity-60"
+                        >
+                            Login to Cloud
+                        </button>
+                    </form>
+
+                    {{-- Register form --}}
+                    <form data-form="register" class="mt-5 hidden space-y-4">
+                        @csrf
+                        <div>
+                            <label for="register_name" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Full Name</label>
+                            <input
+                                type="text"
+                                id="register_name"
+                                name="name"
+                                autocomplete="name"
+                                required
+                                class="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-white/15 dark:bg-white/5 dark:text-white dark:placeholder-slate-500 dark:focus:border-blue-400"
+                            />
+                        </div>
+                        <div>
+                            <label for="register_email" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Email</label>
+                            <input
+                                type="email"
+                                id="register_email"
+                                name="email"
+                                autocomplete="email"
+                                required
+                                class="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-white/15 dark:bg-white/5 dark:text-white dark:placeholder-slate-500 dark:focus:border-blue-400"
+                            />
+                        </div>
+                        <div>
+                            <label for="register_password" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Password</label>
+                            <input
+                                type="password"
+                                id="register_password"
+                                name="password"
+                                autocomplete="new-password"
+                                required
+                                class="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-white/15 dark:bg-white/5 dark:text-white dark:placeholder-slate-500 dark:focus:border-blue-400"
+                            />
+                        </div>
+                        <div>
+                            <label for="register_password_confirmation" class="block text-sm font-medium text-slate-700 dark:text-slate-300">Confirm Password</label>
+                            <input
+                                type="password"
+                                id="register_password_confirmation"
+                                name="password_confirmation"
+                                autocomplete="new-password"
+                                required
+                                class="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-white/15 dark:bg-white/5 dark:text-white dark:placeholder-slate-500 dark:focus:border-blue-400"
+                            />
+                        </div>
+                        <button
+                            type="submit"
+                            data-submit
+                            class="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:opacity-60"
+                        >
+                            Create Cloud Account
+                        </button>
+                    </form>
+
                 </div>
             </div>
         </section>
     </div>
 </main>
+<script>
+    (() => {
+        const csrfToken = @json(csrf_token());
+        const loginEndpoint = @json(route('startup.cloud.login'));
+        const registerEndpoint = @json(route('startup.cloud.register'));
+
+        const tabButtons = document.querySelectorAll('[data-tab]');
+        const loginForm = document.querySelector('[data-form="login"]');
+        const registerForm = document.querySelector('[data-form="register"]');
+        const errorContainer = document.querySelector('[data-cloud-error]');
+        const serverUrlInput = document.querySelector('#server_url');
+
+        const setError = (messages) => {
+            if (!errorContainer) return;
+            const list = Array.isArray(messages) ? messages : [messages];
+            errorContainer.innerHTML = '';
+            const title = document.createElement('p');
+            title.className = 'font-semibold';
+            title.textContent = 'Unable to continue.';
+            errorContainer.appendChild(title);
+            const ul = document.createElement('ul');
+            ul.className = 'mt-2 list-disc space-y-1 pl-5';
+            list.filter(Boolean).forEach((msg) => {
+                const li = document.createElement('li');
+                li.textContent = String(msg);
+                ul.appendChild(li);
+            });
+            errorContainer.appendChild(ul);
+            errorContainer.classList.remove('hidden');
+        };
+
+        const clearError = () => {
+            if (!errorContainer) return;
+            errorContainer.classList.add('hidden');
+            errorContainer.innerHTML = '';
+        };
+
+        const parseMessages = (payload, fallback) => {
+            if (!payload || typeof payload !== 'object') return [fallback];
+            const messages = [];
+            if (typeof payload.message === 'string' && payload.message.trim()) {
+                messages.push(payload.message.trim());
+            }
+            if (payload.errors && typeof payload.errors === 'object') {
+                Object.values(payload.errors).forEach((value) => {
+                    const items = Array.isArray(value) ? value : [value];
+                    items.forEach((item) => {
+                        if (typeof item === 'string' && item.trim()) messages.push(item.trim());
+                    });
+                });
+            }
+            return messages.length > 0 ? messages : [fallback];
+        };
+
+        const switchTab = (activeTab) => {
+            tabButtons.forEach((btn) => {
+                const isActive = btn.dataset.tab === activeTab;
+                btn.className = 'flex-1 rounded-lg px-4 py-2 text-sm font-medium transition ' +
+                    (isActive ? btn.dataset.activeClass : btn.dataset.inactiveClass);
+            });
+            if (loginForm) loginForm.classList.toggle('hidden', activeTab !== 'login');
+            if (registerForm) registerForm.classList.toggle('hidden', activeTab !== 'register');
+            clearError();
+        };
+
+        tabButtons.forEach((btn) => {
+            btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+        });
+
+        // Initialise active state
+        switchTab('login');
+
+        const submitForm = async (form, endpoint) => {
+            clearError();
+            const submitBtn = form.querySelector('[data-submit]');
+            submitBtn?.setAttribute('disabled', 'disabled');
+
+            const data = {};
+            new FormData(form).forEach((value, key) => {
+                if (key !== '_token') data[key] = value;
+            });
+
+            // Attach server URL from shared field when present
+            if (serverUrlInput && serverUrlInput.value.trim()) {
+                data.server_url = serverUrlInput.value.trim();
+            }
+
+            try {
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json',
+                        'X-CSRF-TOKEN': csrfToken,
+                        'X-Requested-With': 'XMLHttpRequest',
+                    },
+                    body: JSON.stringify(data),
+                });
+
+                const payload = await response.json().catch(() => ({}));
+
+                if (!response.ok) {
+                    setError(parseMessages(payload, 'Authentication failed. Please try again.'));
+                    return;
+                }
+
+                if (payload.redirect) {
+                    window.location.assign(payload.redirect);
+                    return;
+                }
+
+                setError(['Unexpected response from server.']);
+            } catch (error) {
+                setError([error?.message || 'Unable to connect to server.']);
+            } finally {
+                submitBtn?.removeAttribute('disabled');
+            }
+        };
+
+        loginForm?.addEventListener('submit', (e) => {
+            e.preventDefault();
+            submitForm(loginForm, loginEndpoint);
+        });
+
+        registerForm?.addEventListener('submit', (e) => {
+            e.preventDefault();
+            submitForm(registerForm, registerEndpoint);
+        });
+    })();
+</script>
 </body>
 </html>

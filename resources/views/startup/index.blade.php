@@ -61,12 +61,13 @@
                         </button>
                     </form>
 
-                    <div class="rounded-2xl border border-slate-300/80 bg-slate-100/90 p-5 dark:border-white/15 dark:bg-white/5">
-                        <div class="flex min-h-24 flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white/70 px-4 text-center dark:border-white/15 dark:bg-slate-900/40">
-                            <span class="text-base font-semibold text-slate-700 dark:text-slate-100">Cloud Login Coming Soon</span>
-                            <p class="mt-2 text-sm text-slate-500 dark:text-slate-300">Cloud account connection for desktop POS is not available yet.</p>
+                    <a href="{{ route('startup.cloud.form') }}" class="group block w-full rounded-2xl border border-slate-300 bg-white p-5 text-left transition hover:border-blue-400/70 hover:bg-blue-50 dark:border-white/15 dark:bg-white/5 dark:hover:border-blue-300/60 dark:hover:bg-blue-400/10">
+                        <div class="flex items-center justify-between">
+                            <span class="text-base font-semibold text-slate-900 dark:text-white">Connect to Cloud</span>
+                            <span class="rounded-lg border border-blue-300/50 bg-blue-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] text-blue-700 dark:border-blue-300/30 dark:bg-blue-400/10 dark:text-blue-100">Cloud</span>
                         </div>
-                    </div>
+                        <p class="mt-2 text-sm text-slate-600 dark:text-slate-300">Login with your cloud account to sync store data and manage operations centrally.</p>
+                    </a>
                 </div>
             </div>
         </section>
