@@ -1,14 +1,11 @@
 <?php
 
+use App\Http\Controllers\PrintPaymentReceiptController;
 use App\Http\Controllers\StartupController;
-use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use SmartTill\Core\Http\Controllers\PublicPaymentReceiptController;
-use SmartTill\Core\Models\Payment;
 
-Route::get('/', function () {
-    return to_route('startup.index');
-});
+Route::redirect('/', '/startup');
 
 Route::get('/startup', [StartupController::class, 'index'])->name('startup.index');
 Route::post('/startup/guest', [StartupController::class, 'continueAsGuest'])->name('startup.guest');
@@ -29,23 +26,11 @@ Route::get('/startup/cloud/sync-status', [StartupController::class, 'syncStatus'
 Route::get('/startup/cloud/sync-log', [StartupController::class, 'syncLog'])->name('startup.cloud.sync-log');
 
 if (! Route::has('print.payment')) {
-    if (class_exists(PublicPaymentReceiptController::class)) {
-        Route::get('/payments/{payment}/receipt', PublicPaymentReceiptController::class)
-            ->middleware('web')
-            ->name('print.payment');
-    } else {
-        Route::get('/payments/{payment}/receipt', function (Request $request, Payment $payment) {
-            $next = urldecode((string) $request->query('next', '/'));
+    $printPaymentController = class_exists(PublicPaymentReceiptController::class)
+        ? PublicPaymentReceiptController::class
+        : PrintPaymentReceiptController::class;
 
-            return response()->view('print.payment', [
-                'payment' => $payment->loadMissing([
-                    'payable',
-                    'store.currency',
-                    'store.timezone',
-                ]),
-                'next' => $next,
-                'paper' => $request->query('paper'),
-            ]);
-        })->middleware('web')->name('print.payment');
-    }
+    Route::get('/payments/{payment}/receipt', $printPaymentController)
+        ->middleware('web')
+        ->name('print.payment');
 }

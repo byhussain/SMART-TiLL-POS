@@ -163,9 +163,20 @@ return [
 
     /**
      * Define your own scripts to run before and after the build process.
+     *
+     * Cache commands run here so they apply to every build (local + CI),
+     * and the generated cache files get bundled into the packaged app —
+     * eliminating per-request config parsing, view compilation, and
+     * Filament component discovery on the user's machine.
      */
     'prebuild' => [
         'npm run build',
+        'php artisan filament:assets',
+        'php artisan filament:cache-components',
+        'php artisan icons:cache',
+        'php artisan view:cache',
+        'php artisan event:cache',
+        'php artisan route:cache',
     ],
 
     'postbuild' => [

@@ -14,6 +14,17 @@ class PosSystemUserService
 
     public function ensureAuthenticated(): User
     {
+        // Fast path: when already logged in as the POS system user, return the
+        // current user without any DB queries. This middleware runs on every
+        // panel request — the previous implementation hit users + stores tables
+        // unconditionally, which dominated request time on Windows SQLite.
+        if (Auth::check()) {
+            $current = Auth::user();
+            if ($current instanceof User && $current->email === self::SYSTEM_EMAIL) {
+                return $current;
+            }
+        }
+
         $user = User::query()->firstOrCreate(
             ['email' => self::SYSTEM_EMAIL],
             [
