@@ -8,7 +8,7 @@ return [
      * It is used to determine if the app needs to be updated.
      * Increment this value every time you release a new version of your app.
      */
-    'version' => '1.0.4',
+    'version' => '1.0.5',
 
     /**
      * The ID of your application. This should be a unique identifier
@@ -177,6 +177,11 @@ return [
         'php artisan view:cache',
         'php artisan event:cache',
         'php artisan route:cache',
+        // Pre-set WAL on the bundled SQLite so NativePHP's runtime PRAGMA at
+        // boot becomes a no-op. Without this, every cold start raced multiple
+        // PHP processes (web + queue workers) trying to set WAL on the same
+        // file → "database is locked" errors on Windows.
+        'php -r "$db = new PDO(\'sqlite:database/database.sqlite\'); $db->exec(\'PRAGMA journal_mode=WAL\'); $db->exec(\'PRAGMA synchronous=NORMAL\');"',
     ],
 
     'postbuild' => [
