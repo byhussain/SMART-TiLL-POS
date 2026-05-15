@@ -602,9 +602,16 @@ class CloudSyncService
         $manifest = (array) ($bootstrapResponse->json('manifest') ?? []);
         $runtimeStateService->markBootstrapStarted((int) $localStore->id, $generation, 'Downloading store data');
 
+        // No total-time cap on the bootstrap download — the snapshot can be
+        // arbitrarily large and we cannot predict a safe upper bound for the
+        // user's connection speed. Guzzle/cURL treats 0 as "wait forever for
+        // the body". A 30s connect timeout is still enforced so a dead host
+        // fails fast instead of hanging silently.
         $downloadResponse = Http::baseUrl($baseUrl)
             ->withToken($token)
             ->accept('application/x-ndjson')
+            ->connectTimeout(30)
+            ->timeout(0)
             ->get("/api/pos/v2/stores/{$serverStoreId}/bootstrap/{$generation}/download");
 
         if (! $downloadResponse->successful()) {
@@ -684,6 +691,8 @@ class CloudSyncService
         $deltaResponse = Http::baseUrl($baseUrl)
             ->withToken($token)
             ->acceptJson()
+            ->connectTimeout(15)
+            ->timeout(0)
             ->get("/api/pos/v2/stores/{$serverStoreId}/delta", array_filter([
                 'since' => is_string($since) && $since !== '' ? $since : null,
                 'resource' => $resource,
@@ -1234,10 +1243,19 @@ class CloudSyncService
 
     private function hasValidCloudToken(string $baseUrl, string $token): bool
     {
-        $authCheck = Http::baseUrl($baseUrl)
-            ->withToken($token)
-            ->acceptJson()
-            ->get('/api/pos/user');
+        // Short timeouts: this is a connectivity probe, not a real workload.
+        // If the network is down or the server is wedged, fail fast so the
+        // queue worker can move on instead of hanging Guzzle's default 30s.
+        try {
+            $authCheck = Http::baseUrl($baseUrl)
+                ->withToken($token)
+                ->acceptJson()
+                ->connectTimeout(5)
+                ->timeout(10)
+                ->get('/api/pos/user');
+        } catch (\Throwable $e) {
+            return false;
+        }
 
         return $authCheck->successful();
     }
