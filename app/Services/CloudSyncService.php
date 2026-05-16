@@ -656,6 +656,48 @@ class CloudSyncService
         }
     }
 
+    /**
+     * Push-only sync: ships pending local rows to the cloud and stops. No
+     * GET /delta, no ack roundtrip, no big incoming payload. Used by the
+     * model observer so a single sale save propagates in ~1 second instead
+     * of waiting for a full delta cycle (which can take 10–60s when the
+     * server returns a lot of incoming data).
+     */
+    public function runPushOnly(
+        string $baseUrl,
+        string $token,
+        Store $localStore,
+        ?string $module = null,
+        ?string $resource = null,
+    ): array {
+        $serverStoreId = (int) ($localStore->server_id ?? 0);
+        if ($serverStoreId <= 0) {
+            return ['ok' => false, 'message' => 'Local store is not linked with cloud store.'];
+        }
+
+        if (! $this->hasValidCloudToken($baseUrl, $token)) {
+            return ['ok' => false, 'message' => 'Cloud token is invalid or expired.'];
+        }
+
+        $resources = $resource !== null
+            ? [$resource]
+            : ($module !== null ? $this->resolveResourcesForModule($module) : self::PULL_ORDER);
+
+        if ($module !== null && $resources === []) {
+            return ['ok' => false, 'message' => 'Invalid sync module selected.'];
+        }
+
+        $pushed = $this->pushPendingRowsV2($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
+
+        return [
+            'ok' => true,
+            'mode' => 'push',
+            'module' => $module,
+            'resource' => $resource,
+            'pushed' => $pushed,
+        ];
+    }
+
     public function runDeltaSync(
         string $baseUrl,
         string $token,

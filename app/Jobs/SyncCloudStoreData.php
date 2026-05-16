@@ -6,6 +6,7 @@ use App\Models\Store;
 use App\Models\SyncOutbox;
 use App\Services\CloudSyncService;
 use App\Services\RuntimeStateService;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Foundation\Queue\Queueable;
@@ -14,7 +15,7 @@ use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Queue\SerializesModels;
 use Throwable;
 
-class SyncCloudStoreData implements ShouldQueue
+class SyncCloudStoreData implements ShouldBeUnique, ShouldQueue
 {
     use Dispatchable;
     use InteractsWithQueue;
@@ -26,6 +27,13 @@ class SyncCloudStoreData implements ShouldQueue
     public int $timeout = 1200;
 
     public int $backoff = 30;
+
+    /**
+     * How long Laravel holds the uniqueness lock. Multiple observer calls
+     * within this window (e.g. saving a sale with several line items) collapse
+     * to a single queued job instead of N copies fighting for the same scope.
+     */
+    public int $uniqueFor = 30;
 
     public int $storeId;
 
@@ -43,7 +51,7 @@ class SyncCloudStoreData implements ShouldQueue
     ) {
         $this->storeId = $storeId;
 
-        if (! in_array($action, ['auto', 'bootstrap', 'delta'], true) && $module === null && $resource === null) {
+        if (! in_array($action, ['auto', 'bootstrap', 'delta', 'push'], true) && $module === null && $resource === null) {
             $this->action = 'delta';
             $this->module = $action;
             $this->resource = null;
@@ -54,6 +62,22 @@ class SyncCloudStoreData implements ShouldQueue
         $this->action = $action;
         $this->module = $module;
         $this->resource = $resource;
+    }
+
+    /**
+     * Coalesce duplicate dispatches. Saving a sale with five line items
+     * triggers the observer six times — without this, six identical jobs
+     * queue up and the worker drains them one by one, multiplying sync
+     * time by 6×.
+     */
+    public function uniqueId(): string
+    {
+        return implode('-', array_filter([
+            (string) $this->storeId,
+            $this->action,
+            $this->module,
+            $this->resource,
+        ]));
     }
 
     public function handle(RuntimeStateService $runtimeStateService, CloudSyncService $cloudSyncService): void
@@ -79,6 +103,13 @@ class SyncCloudStoreData implements ShouldQueue
                     (string) $state->cloud_base_url,
                     (string) $state->cloud_token,
                     $store
+                ),
+                'push' => $cloudSyncService->runPushOnly(
+                    (string) $state->cloud_base_url,
+                    (string) $state->cloud_token,
+                    $store,
+                    $this->module,
+                    $this->resource
                 ),
                 default => $cloudSyncService->runDeltaSync(
                     (string) $state->cloud_base_url,

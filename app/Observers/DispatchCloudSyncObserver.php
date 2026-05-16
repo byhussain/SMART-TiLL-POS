@@ -25,17 +25,56 @@ class DispatchCloudSyncObserver
 
     public function created(Model $model): void
     {
+        $this->markPending($model);
         $this->dispatchForModel($model);
     }
 
     public function updated(Model $model): void
     {
+        $this->markPending($model);
         $this->dispatchForModel($model);
     }
 
     public function deleted(Model $model): void
     {
         $this->dispatchForModel($model);
+    }
+
+    /**
+     * Flag the row as needing a push to the cloud. Without this, edits to a
+     * previously-synced sale (or any other record) leave the row at
+     * sync_state='synced' and the push job silently skips it — meaning local
+     * updates never reach the server. We use the DB facade so re-saving the
+     * model doesn't fire model events recursively.
+     */
+    private function markPending(Model $model): void
+    {
+        $table = $model->getTable();
+
+        if (! Schema::hasTable($table) || ! Schema::hasColumn($table, 'sync_state')) {
+            return;
+        }
+
+        $key = $model->getKey();
+        if (! is_numeric($key)) {
+            return;
+        }
+
+        $updates = ['sync_state' => 'pending'];
+
+        if (Schema::hasColumn($table, 'sync_error')) {
+            $updates['sync_error'] = null;
+        }
+
+        DB::table($table)->where('id', (int) $key)->update($updates);
+
+        // Keep the in-memory model consistent so any later code in the same
+        // request reads the fresh sync_state.
+        $model->setAttribute('sync_state', 'pending');
+        if (Schema::hasColumn($table, 'sync_error')) {
+            $model->setAttribute('sync_error', null);
+        }
+        $model->syncOriginal();
     }
 
     private function dispatchForModel(Model $model): void
@@ -63,13 +102,16 @@ class DispatchCloudSyncObserver
             return;
         }
 
+        // Push-only mode: only ship the rows we just touched. Pulling cloud
+        // deltas is handled separately by the auto-sync poller every 2 minutes,
+        // so observer-driven syncs don't need the heavy GET /delta roundtrip.
         if (in_array($resource, ['sales', 'sale_variation', 'sale_preparable_items'], true)) {
-            SyncCloudStoreData::dispatch($storeId, 'delta', 'sales')->afterCommit();
+            SyncCloudStoreData::dispatch($storeId, 'push', 'sales')->afterCommit();
 
             return;
         }
 
-        SyncCloudStoreData::dispatch($storeId, 'delta', null, $resource)->afterCommit();
+        SyncCloudStoreData::dispatch($storeId, 'push', null, $resource)->afterCommit();
     }
 
     private function ensureServerManagedReference(Model $model): void
