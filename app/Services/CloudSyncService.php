@@ -1083,15 +1083,24 @@ class CloudSyncService
         $pulled = 0;
         $resourceList = ! empty($resources) ? $resources : self::PULL_ORDER;
         $deferredRowsByResource = [];
+        $runtimeStateService = app(RuntimeStateService::class);
 
         foreach ($resourceList as $resource) {
             $page = 1;
             $hasMore = true;
 
+            // Surface what's happening during reconcile/backfill so the bootstrap
+            // UI doesn't appear frozen at 99% while we paginate large resources.
+            $runtimeStateService->updateStoreSyncState($localStoreId, [
+                'bootstrap_progress_label' => "Reconciling {$resource}",
+            ]);
+
             while ($hasMore) {
                 $response = Http::baseUrl($baseUrl)
                     ->withToken($token)
                     ->acceptJson()
+                    ->connectTimeout(15)
+                    ->timeout(0)
                     ->get("/api/pos/v1/stores/{$serverStoreId}/sync/{$resource}", [
                         'page' => $page,
                         'per_page' => self::PULL_PER_PAGE,
