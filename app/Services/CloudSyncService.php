@@ -1497,7 +1497,7 @@ class CloudSyncService
             }
 
             $localRow = $this->findExistingLocalRow($resource, $tombstone, $localStoreId);
-            if ($localRow === null || $this->shouldSkipPulledRow($resource, $localRow, $localStoreId)) {
+            if ($localRow === null || $this->shouldSkipPulledRow($resource, $localRow, $localStoreId, $tombstone)) {
                 continue;
             }
 
@@ -1677,22 +1677,85 @@ class CloudSyncService
         return null;
     }
 
-    private function shouldSkipPulledRow(string $table, object $localRow, int $localStoreId): bool
+    /**
+     * Local-priority sync policy. A pulled server row is only allowed to
+     * overwrite a local row when ALL of these are false:
+     *
+     *  1. Local row has unsynced edits (sync_state in pending/failed) — the
+     *     user changed something offline and the push hasn't run yet.
+     *  2. Local row has a pending outbox entry — same idea, tracked
+     *     separately for some resources.
+     *  3. Local row was pushed within the echo window (~5 min). The server
+     *     re-emits everything we just sent, often with slightly different
+     *     normalization; without this guard, a fresh push gets immediately
+     *     overwritten by its own echo and the totals/references end up
+     *     looking wrong to the user.
+     *  4. Local row's updated_at is strictly newer than the server's — the
+     *     local copy already represents a later edit, so server data would
+     *     be a regression.
+     *
+     * The user explicitly asked for "local changes are top priority"; if
+     * another device legitimately modifies the same row, that change is
+     * deferred until the local row is no longer winning by these rules.
+     */
+    private function shouldSkipPulledRow(string $table, object $localRow, int $localStoreId, array $serverPayload = []): bool
     {
         if (property_exists($localRow, 'sync_state') && in_array((string) ($localRow->sync_state ?? ''), ['pending', 'failed'], true)) {
             return true;
         }
 
         $localId = (int) ($localRow->id ?? 0);
-        if ($localId <= 0) {
-            return false;
+        if ($localId > 0) {
+            $hasPendingOutbox = SyncOutbox::query()
+                ->where('entity_type', $table)
+                ->where('local_id', $localId)
+                ->whereIn('status', ['pending', 'failed'])
+                ->exists();
+
+            if ($hasPendingOutbox) {
+                return true;
+            }
         }
 
-        return SyncOutbox::query()
-            ->where('entity_type', $table)
-            ->where('local_id', $localId)
-            ->whereIn('status', ['pending', 'failed'])
-            ->exists();
+        // Echo window: just-pushed rows come back from the server on the next
+        // delta and silently corrupt fields the user (or local form save)
+        // already set. 5 minutes covers slow networks + clock skew.
+        $localSyncedAt = property_exists($localRow, 'synced_at') ? $localRow->synced_at : null;
+        $localSyncedTs = $this->toTimestamp($localSyncedAt);
+        if ($localSyncedTs !== null && $localSyncedTs > now()->subMinutes(5)->getTimestamp()) {
+            return true;
+        }
+
+        // Strict timestamp protection: if our copy is newer, keep it.
+        $localUpdatedAt = property_exists($localRow, 'updated_at') ? $localRow->updated_at : null;
+        $localTs = $this->toTimestamp($localUpdatedAt);
+        $serverTs = $this->toTimestamp($serverPayload['updated_at'] ?? null);
+
+        if ($localTs !== null && $serverTs !== null && $localTs > $serverTs) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Coerce mixed date/datetime values (string, DateTime, Carbon) to a
+     * unix timestamp, or null if unparseable. Centralised so the skip
+     * policy reads the same way for every field.
+     */
+    private function toTimestamp(mixed $value): ?int
+    {
+        if ($value instanceof \DateTimeInterface) {
+            return $value->getTimestamp();
+        }
+
+        if (is_string($value) && $value !== '') {
+            $parsed = strtotime($value);
+
+            return $parsed === false ? null : $parsed;
+        }
+
+        return null;
     }
 
     /**
@@ -1905,7 +1968,7 @@ class CloudSyncService
                 ->all();
 
             $existingLocalRow = $this->findExistingLocalRow($table, $normalized, $localStoreId);
-            if ($existingLocalRow !== null && $this->shouldSkipPulledRow($table, $existingLocalRow, $localStoreId)) {
+            if ($existingLocalRow !== null && $this->shouldSkipPulledRow($table, $existingLocalRow, $localStoreId, $normalized)) {
                 continue;
             }
 
@@ -1970,9 +2033,18 @@ class CloudSyncService
                 $existingNaturalQuery = DB::table($table)->where($naturalLookup);
 
                 if (Schema::hasColumn($table, 'id')) {
-                    $existingId = $existingNaturalQuery->value('id');
+                    $existingNaturalRow = $existingNaturalQuery->first();
+                    $existingId = is_object($existingNaturalRow) ? ($existingNaturalRow->id ?? null) : null;
 
                     if (is_numeric($existingId)) {
+                        // Apply the same local-priority guard the top-level
+                        // skip check uses, since natural keys (e.g. customer
+                        // phone) can match a local row that findExistingLocalRow
+                        // missed because we don't yet have a server_id mapping.
+                        if ($this->shouldSkipPulledRow($table, $existingNaturalRow, $localStoreId, $normalized)) {
+                            continue;
+                        }
+
                         if (
                             is_numeric($existingByServerId)
                             && (int) $existingByServerId !== (int) $existingId

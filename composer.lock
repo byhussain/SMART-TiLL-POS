@@ -5738,16 +5738,16 @@
         },
         {
             "name": "smart-till/core",
-            "version": "v1.1.1",
+            "version": "v1.1.2",
             "source": {
                 "type": "git",
                 "url": "https://github.com/byhussain/core.git",
-                "reference": "bddf806fe1411969554d95694adcb7999b98fa3b"
+                "reference": "7279fdc84fbe4cc71041c52bb9087fe1143b883d"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/byhussain/core/zipball/bddf806fe1411969554d95694adcb7999b98fa3b",
-                "reference": "bddf806fe1411969554d95694adcb7999b98fa3b",
+                "url": "https://api.github.com/repos/byhussain/core/zipball/7279fdc84fbe4cc71041c52bb9087fe1143b883d",
+                "reference": "7279fdc84fbe4cc71041c52bb9087fe1143b883d",
                 "shasum": ""
             },
             "require": {
@@ -5785,9 +5785,9 @@
             "description": "SMART TiLL core Filament modules",
             "support": {
                 "issues": "https://github.com/byhussain/core/issues",
-                "source": "https://github.com/byhussain/core/tree/v1.1.1"
+                "source": "https://github.com/byhussain/core/tree/v1.1.2"
             },
-            "time": "2026-05-16T15:13:48+00:00"
+            "time": "2026-05-16T17:14:19+00:00"
         },
         {
             "name": "spatie/invade",
