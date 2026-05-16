@@ -251,18 +251,34 @@
     x-init="init()"
     class="relative flex items-center justify-center"
 >
+    @php
+        $headerTooltip = match (true) {
+            ! $isCloudConnected => 'Cloud — not connected',
+            $hasSyncError => 'Cloud sync has errors — click for details',
+            $isBootstrapping => 'Cloud bootstrap in progress',
+            $isSyncing => 'Cloud sync in progress',
+            default => 'Cloud connected — click for sync options',
+        };
+    @endphp
+
     <div class="group relative inline-flex items-center">
-        <span
-            class="inline-flex items-center justify-center text-slate-500 transition hover:text-slate-700 dark:text-slate-300 dark:hover:text-white"
-            title="Cloud Sync Coming Soon"
-            aria-label="Cloud sync coming soon"
+        <button
+            type="button"
+            @click="open = ! open"
+            class="inline-flex items-center justify-center {{ $iconColorClass }} transition hover:opacity-80"
+            :class="(isQueueSyncing || isBootstrapping) ? 'animate-pulse' : ''"
+            title="{{ $headerTooltip }}"
+            aria-label="{{ $headerTooltip }}"
         >
             <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
                 <path d="M18 10a6 6 0 0 0-11.3-2.6A4.5 4.5 0 0 0 7 16h9a4 4 0 0 0 2-7.5"/>
             </svg>
-        </span>
+            @if ($isCloudConnected && $hasSyncError)
+                <span class="absolute -top-1 -right-1 inline-flex h-2.5 w-2.5 rounded-full bg-red-600 ring-2 ring-white dark:ring-gray-900"></span>
+            @endif
+        </button>
         <span class="pointer-events-none absolute left-1/2 top-full z-10 mt-2 -translate-x-1/2 whitespace-nowrap rounded-md bg-slate-900 px-2.5 py-1 text-xs font-medium text-white opacity-0 shadow-lg transition group-hover:opacity-100 group-focus-within:opacity-100 dark:bg-slate-100 dark:text-slate-900">
-            Cloud Sync Coming Soon
+            {{ $headerTooltip }}
         </span>
     </div>
 

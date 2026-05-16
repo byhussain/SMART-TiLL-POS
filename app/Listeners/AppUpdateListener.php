@@ -2,6 +2,8 @@
 
 namespace App\Listeners;
 
+use App\Jobs\SyncCloudStoreData;
+use App\Services\RuntimeStateService;
 use Native\Desktop\Events\AutoUpdater\Error as UpdateError;
 use Native\Desktop\Events\AutoUpdater\UpdateAvailable;
 use Native\Desktop\Events\AutoUpdater\UpdateDownloaded;
@@ -31,18 +33,66 @@ class AppUpdateListener
 {
     public const MENU_ITEM_ID = 'app:check-for-updates';
 
+    public const MENU_ITEM_SYNC_NOW = 'app:cloud-sync-now';
+
     public function handleMenuClick(MenuItemClicked $event): void
     {
         $id = (string) ($event->item['id'] ?? '');
-        if ($id !== self::MENU_ITEM_ID) {
+
+        if ($id === self::MENU_ITEM_ID) {
+            Notification::title('SMART TiLL POS')
+                ->message('Checking for updates…')
+                ->show();
+
+            AutoUpdater::checkForUpdates();
+
             return;
         }
 
-        Notification::title('SMART TiLL POS')
-            ->message('Checking for updates…')
-            ->show();
+        if ($id === self::MENU_ITEM_SYNC_NOW) {
+            $this->triggerCloudSyncNow();
 
-        AutoUpdater::checkForUpdates();
+            return;
+        }
+    }
+
+    /**
+     * Manually fire a cloud delta-sync job. Only acts when the user is logged
+     * in with a cloud account; otherwise shows a friendly notification.
+     */
+    private function triggerCloudSyncNow(): void
+    {
+        /** @var RuntimeStateService $runtimeState */
+        $runtimeState = app(RuntimeStateService::class);
+        $state = $runtimeState->get();
+
+        $isCloudConnected = $state->mode === 'cloud'
+            && (bool) $state->cloud_token_present
+            && filled($state->cloud_base_url)
+            && filled($state->cloud_token);
+
+        if (! $isCloudConnected) {
+            Notification::title('Cloud not connected')
+                ->message('Sign in to cloud first to enable sync.')
+                ->show();
+
+            return;
+        }
+
+        $storeId = (int) ($state->active_store_id ?? 0);
+        if ($storeId <= 0) {
+            Notification::title('No active store')
+                ->message('Select a store before syncing.')
+                ->show();
+
+            return;
+        }
+
+        SyncCloudStoreData::dispatch($storeId, 'delta');
+
+        Notification::title('Cloud sync started')
+            ->message('Pulling the latest data from the cloud server.')
+            ->show();
     }
 
     public function handleUpdateAvailable(UpdateAvailable $event): void

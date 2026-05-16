@@ -43,6 +43,11 @@ class NativeAppServiceProvider implements ProvidesPhpIni
             Menu::edit(),
             Menu::view(),
             Menu::window(),
+            Menu::label('Cloud')->submenu(
+                Menu::label('Sync Now')
+                    ->id(AppUpdateListener::MENU_ITEM_SYNC_NOW)
+                    ->accelerator('CmdOrCtrl+Shift+S'),
+            ),
             Menu::label('Help')->submenu(
                 Menu::label('Check for Updates…')
                     ->id(AppUpdateListener::MENU_ITEM_ID),

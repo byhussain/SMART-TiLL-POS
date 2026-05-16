@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Jobs\SyncCloudStoreData;
+use App\Models\AppRuntimeState;
 use App\Models\Store;
 use App\Models\SyncOutbox;
 use App\Services\CloudSyncService;
@@ -12,6 +13,7 @@ use Filament\Notifications\Notification;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
@@ -509,6 +511,14 @@ class StartupController extends Controller
         ]);
     }
 
+    /**
+     * Soft cooldown between automatic background sync dispatches, in seconds.
+     * The Filament panel polls /sync-status every 15s; without this cooldown
+     * we would queue a sync on every poll even though one already ran a
+     * moment ago.
+     */
+    private const AUTO_SYNC_INTERVAL_SECONDS = 120;
+
     public function syncStatus(): JsonResponse
     {
         $state = $this->runtimeStateService->get();
@@ -627,6 +637,15 @@ class StartupController extends Controller
         $bootstrapStatus = (string) ($state->bootstrap_status ?? 'not_started');
         $isBootstrapping = in_array($bootstrapStatus, ['downloading', 'installing'], true);
 
+        // Background auto-sync: pull cloud deltas on a schedule so that sales
+        // and inventory created on the cloud side (or by other devices)
+        // appear on this terminal without requiring a manual "Sync Now".
+        // Guard rails: only when connected, not currently syncing, not
+        // bootstrapping, and not within the cooldown window. The dispatched
+        // job itself will silently no-op if the cloud is unreachable, so we
+        // don't need an explicit online check.
+        $this->maybeDispatchAutoSync($state, $store->id, $isSyncing, $isBootstrapping);
+
         return response()->json([
             'connected' => true,
             'is_syncing' => $isSyncing && ! $isBootstrapping,
@@ -637,6 +656,43 @@ class StartupController extends Controller
             'has_errors' => $hasErrors,
             'module_syncing' => $detectedModuleSyncing,
         ]);
+    }
+
+    /**
+     * Decide whether enough time has passed since the last cloud sync and, if
+     * so, queue a delta sync job. Called from syncStatus() on each poll.
+     */
+    private function maybeDispatchAutoSync(
+        AppRuntimeState $state,
+        int $storeId,
+        bool $isSyncing,
+        bool $isBootstrapping,
+    ): void {
+        if ($isSyncing || $isBootstrapping) {
+            return;
+        }
+
+        // Require a completed bootstrap before auto-syncing — otherwise we'd
+        // race the initial snapshot download.
+        if (! $this->runtimeStateService->isStoreBootstrapped($storeId)) {
+            return;
+        }
+
+        $lastSyncedAt = $state->last_synced_at;
+        if ($lastSyncedAt instanceof \DateTimeInterface
+            && $lastSyncedAt->getTimestamp() > now()->subSeconds(self::AUTO_SYNC_INTERVAL_SECONDS)->getTimestamp()
+        ) {
+            return;
+        }
+
+        // Cross-request lock so multiple concurrent /sync-status polls (e.g.
+        // user opens two tabs) don't queue duplicate jobs.
+        $lock = Cache::lock("auto-sync-dispatch-{$storeId}", self::AUTO_SYNC_INTERVAL_SECONDS);
+        if (! $lock->get()) {
+            return;
+        }
+
+        SyncCloudStoreData::dispatch($storeId, 'delta');
     }
 
     private function resolveCloudBaseUrl(): ?string
