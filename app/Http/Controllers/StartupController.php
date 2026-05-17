@@ -678,21 +678,73 @@ class StartupController extends Controller
             return;
         }
 
-        $lastSyncedAt = $state->last_synced_at;
-        if ($lastSyncedAt instanceof \DateTimeInterface
-            && $lastSyncedAt->getTimestamp() > now()->subSeconds(self::AUTO_SYNC_INTERVAL_SECONDS)->getTimestamp()
-        ) {
-            return;
+        // Two reasons to dispatch a sync:
+        //   (a) Push backlog — rows created/edited offline waiting to be
+        //       shipped to the cloud. We want this to fire ASAP after the
+        //       network comes back, NOT wait out the 2-minute cooldown.
+        //   (b) Routine pull — bring in changes from other devices or
+        //       server-side edits, bounded by the cooldown to avoid hammering.
+        $hasPendingLocalRows = $this->hasPendingLocalRowsForStore($storeId);
+
+        if (! $hasPendingLocalRows) {
+            $lastSyncedAt = $state->last_synced_at;
+            if ($lastSyncedAt instanceof \DateTimeInterface
+                && $lastSyncedAt->getTimestamp() > now()->subSeconds(self::AUTO_SYNC_INTERVAL_SECONDS)->getTimestamp()
+            ) {
+                return;
+            }
         }
 
-        // Cross-request lock so multiple concurrent /sync-status polls (e.g.
-        // user opens two tabs) don't queue duplicate jobs.
-        $lock = Cache::lock("auto-sync-dispatch-{$storeId}", self::AUTO_SYNC_INTERVAL_SECONDS);
+        // Tighter cross-request lock when there's a push backlog so we
+        // re-attempt every ~30s while offline, instead of waiting out the
+        // full 2-minute pull cooldown.
+        $lockTtl = $hasPendingLocalRows ? 30 : self::AUTO_SYNC_INTERVAL_SECONDS;
+        $lock = Cache::lock("auto-sync-dispatch-{$storeId}", $lockTtl);
         if (! $lock->get()) {
             return;
         }
 
-        SyncCloudStoreData::dispatch($storeId, 'delta');
+        // 'push' when there's a backlog (cheap, no GET /delta), 'delta'
+        // otherwise (full pull+push).
+        $action = $hasPendingLocalRows ? 'push' : 'delta';
+
+        SyncCloudStoreData::dispatch($storeId, $action);
+    }
+
+    /**
+     * Quick check: does this store have any rows whose sync_state is
+     * pending or failed? Used to make the auto-sync poller fire ASAP when
+     * the network comes back online after offline edits.
+     */
+    private function hasPendingLocalRowsForStore(int $storeId): bool
+    {
+        if ($storeId <= 0) {
+            return false;
+        }
+
+        // The tables most likely to carry offline edits — checked first to
+        // exit early. If a row is pending in any of these we should sync.
+        $tables = ['sales', 'sale_variation', 'sale_preparable_items', 'customers', 'payments', 'transactions'];
+
+        foreach ($tables as $table) {
+            if (! Schema::hasTable($table) || ! Schema::hasColumn($table, 'sync_state')) {
+                continue;
+            }
+
+            $query = DB::table($table)->whereIn('sync_state', ['pending', 'failed']);
+
+            if (Schema::hasColumn($table, 'store_id')) {
+                $query->where('store_id', $storeId);
+            } elseif (in_array($table, ['sale_variation', 'sale_preparable_items'], true)) {
+                $query->whereIn('sale_id', DB::table('sales')->where('store_id', $storeId)->select('id'));
+            }
+
+            if ($query->exists()) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function resolveCloudBaseUrl(): ?string
