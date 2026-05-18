@@ -26,6 +26,7 @@ use Illuminate\Cookie\Middleware\EncryptCookies;
 use Illuminate\Foundation\Http\Middleware\VerifyCsrfToken;
 use Illuminate\Routing\Middleware\SubstituteBindings;
 use Illuminate\Session\Middleware\StartSession;
+use Illuminate\Support\Facades\Blade;
 use Illuminate\View\Middleware\ShareErrorsFromSession;
 use SmartTill\Core\Http\Middleware\SetTenantTimezone as CoreSetTenantTimezone;
 
@@ -101,6 +102,14 @@ class StorePanelProvider extends PanelProvider
             ->renderHook(
                 PanelsRenderHook::GLOBAL_SEARCH_BEFORE,
                 fn (): View => view('filament.store.partials.cloud-sync-status'),
+            )
+            // The dark/light/system theme switcher normally lives inside
+            // Filament's user menu, which we've disabled (`userMenu(false)`).
+            // Inject Filament's built-in <x-filament-panels::theme-switcher>
+            // into the topbar so the buttons are visible standalone.
+            ->renderHook(
+                PanelsRenderHook::TOPBAR_END,
+                fn (): string => Blade::render('<x-filament-panels::theme-switcher />'),
             )
             ->renderHook(
                 PanelsRenderHook::BODY_END,
