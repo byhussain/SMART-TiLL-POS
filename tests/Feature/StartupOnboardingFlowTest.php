@@ -20,16 +20,18 @@ it('shows startup screen on first launch', function (): void {
 
     $response->assertOk();
     $response->assertSee('Continue as Guest');
-    $response->assertSee('Cloud Login Coming Soon');
+    // Cloud login is now wired up; the previous "Coming Soon" placeholder
+    // was replaced with a working "Connect to Cloud" link.
+    $response->assertSee('Connect to Cloud');
 });
 
 it('shows cloud auth screen', function (): void {
     $response = $this->get(route('startup.cloud.form'));
 
     $response->assertOk();
-    $response->assertSee('Connect POS to Cloud');
-    $response->assertSee('Cloud Login Coming Soon');
-    $response->assertSee('Desktop cloud authentication and store sync setup will be available in a future release.');
+    // Cloud auth view shows a real email/password form now, not a stub.
+    $response->assertSee('email', escape: false);
+    $response->assertSee('password', escape: false);
 });
 
 it('redirects guest flow to startup setup when no store exists', function (): void {

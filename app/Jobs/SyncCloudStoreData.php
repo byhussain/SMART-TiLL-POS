@@ -51,7 +51,7 @@ class SyncCloudStoreData implements ShouldBeUnique, ShouldQueue
     ) {
         $this->storeId = $storeId;
 
-        if (! in_array($action, ['auto', 'bootstrap', 'delta', 'push'], true) && $module === null && $resource === null) {
+        if (! in_array($action, ['auto', 'bootstrap', 'delta', 'push', 'reconcile'], true) && $module === null && $resource === null) {
             $this->action = 'delta';
             $this->module = $action;
             $this->resource = null;
@@ -110,6 +110,11 @@ class SyncCloudStoreData implements ShouldBeUnique, ShouldQueue
                     $store,
                     $this->module,
                     $this->resource
+                ),
+                'reconcile' => $cloudSyncService->runForceReconcile(
+                    (string) $state->cloud_base_url,
+                    (string) $state->cloud_token,
+                    $store
                 ),
                 default => $cloudSyncService->runDeltaSync(
                     (string) $state->cloud_base_url,

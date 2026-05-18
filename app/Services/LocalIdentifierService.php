@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Support\SqliteWriteRetry;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
@@ -89,7 +90,7 @@ class LocalIdentifierService
     {
         $this->ensureSequenceTableExists();
 
-        return DB::transaction(function () use ($prefix, $storeId, $entityType): int {
+        return SqliteWriteRetry::run(fn (): int => DB::transaction(function () use ($prefix, $storeId, $entityType): int {
             $query = DB::table('local_id_sequences')
                 ->where('prefix', $prefix)
                 ->where('store_id', $storeId);
@@ -128,7 +129,7 @@ class LocalIdentifierService
                 ]);
 
             return $next;
-        }, 3);
+        }, 3));
     }
 
     private function ensureSequenceTableExists(): void

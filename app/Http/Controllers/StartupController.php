@@ -512,6 +512,31 @@ class StartupController extends Controller
     }
 
     /**
+     * Dispatch a full reconcile job for the active store. Pushes any pending
+     * local rows and re-pulls every cloud resource fresh, repairing data
+     * dropped by older sync bugs (missing line items, edits never reaching
+     * the server, etc.).
+     */
+    public function reconcile(Request $request): JsonResponse
+    {
+        $state = $this->runtimeStateService->get();
+        $store = Store::query()->find($state->active_store_id);
+
+        if (! $store || ! $state->cloud_token_present || ! $state->cloud_base_url || ! $state->cloud_token) {
+            return response()->json([
+                'message' => 'Cloud is not connected.',
+            ], 422);
+        }
+
+        SyncCloudStoreData::dispatch((int) $store->id, 'reconcile');
+
+        return response()->json([
+            'message' => 'Repair sync queued. The window may show "Syncing" for a few minutes while the device re-downloads every resource.',
+            'queued' => true,
+        ]);
+    }
+
+    /**
      * Soft cooldown between automatic background sync dispatches, in seconds.
      * The Filament panel polls /sync-status every 15s; without this cooldown
      * we would queue a sync on every poll even though one already ran a

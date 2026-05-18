@@ -6,6 +6,7 @@ use App\Jobs\SyncCloudStoreData;
 use App\Models\Store;
 use App\Services\LocalIdentifierService;
 use App\Services\RuntimeStateService;
+use App\Support\SqliteWriteRetry;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -37,7 +38,68 @@ class DispatchCloudSyncObserver
 
     public function deleted(Model $model): void
     {
+        $this->recordTombstone($model);
         $this->dispatchForModel($model);
+    }
+
+    /**
+     * Record a pending tombstone in sync_outbox so the next push job tells the
+     * server to soft-delete the same row. Without this, deletes made on the
+     * POS never reach the server — and conversely, deletes the server already
+     * propagated to us via `delta()` would only ever flow one direction.
+     */
+    private function recordTombstone(Model $model): void
+    {
+        $resource = $this->resolveResource($model);
+        if ($resource === null) {
+            return;
+        }
+
+        $localId = $model->getKey();
+        if (! is_numeric($localId)) {
+            return;
+        }
+
+        $serverId = null;
+        if (Schema::hasColumn($model->getTable(), 'server_id')) {
+            $rawServerId = $model->getAttribute('server_id');
+            if (is_numeric($rawServerId) && (int) $rawServerId > 0) {
+                $serverId = (int) $rawServerId;
+            }
+        }
+
+        $localIdString = null;
+        if (Schema::hasColumn($model->getTable(), 'local_id')) {
+            $rawLocalId = $model->getAttribute('local_id');
+            if ($rawLocalId !== null && (string) $rawLocalId !== '') {
+                $localIdString = (string) $rawLocalId;
+            }
+        }
+
+        // If we have neither anchor the server can match on, the tombstone is
+        // useless — the row was created and deleted before it ever synced.
+        // Drop it on the floor.
+        if ($serverId === null && $localIdString === null) {
+            return;
+        }
+
+        $storeId = $this->resolveStoreId($model);
+
+        SqliteWriteRetry::run(fn () => DB::table('sync_outbox')->insert([
+            'entity_type' => $resource,
+            'local_id' => (int) $localId,
+            'server_id' => $serverId,
+            'operation' => 'delete',
+            'payload' => json_encode([
+                'store_id' => $storeId > 0 ? $storeId : null,
+                'local_id' => $localIdString,
+            ]),
+            'attempts' => 0,
+            'status' => 'pending',
+            'error' => null,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]));
     }
 
     /**
@@ -66,7 +128,7 @@ class DispatchCloudSyncObserver
             $updates['sync_error'] = null;
         }
 
-        DB::table($table)->where('id', (int) $key)->update($updates);
+        SqliteWriteRetry::run(fn () => DB::table($table)->where('id', (int) $key)->update($updates));
 
         // Keep the in-memory model consistent so any later code in the same
         // request reads the fresh sync_state.
@@ -141,9 +203,9 @@ class DispatchCloudSyncObserver
             return;
         }
 
-        DB::table($table)
+        SqliteWriteRetry::run(fn () => DB::table($table)
             ->where('id', (int) $key)
-            ->update(['reference' => null]);
+            ->update(['reference' => null]));
 
         $model->setAttribute('reference', null);
     }

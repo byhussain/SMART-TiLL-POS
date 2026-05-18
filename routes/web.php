@@ -24,6 +24,7 @@ Route::post('/startup/cloud/sync-now', [StartupController::class, 'syncNow'])->n
 Route::post('/startup/cloud/sync-module', [StartupController::class, 'syncModule'])->name('startup.cloud.sync-module');
 Route::get('/startup/cloud/sync-status', [StartupController::class, 'syncStatus'])->name('startup.cloud.sync-status');
 Route::get('/startup/cloud/sync-log', [StartupController::class, 'syncLog'])->name('startup.cloud.sync-log');
+Route::post('/startup/cloud/reconcile', [StartupController::class, 'reconcile'])->name('startup.cloud.reconcile');
 
 if (! Route::has('print.payment')) {
     $printPaymentController = class_exists(PublicPaymentReceiptController::class)

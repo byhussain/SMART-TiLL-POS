@@ -99,6 +99,7 @@
         messageTimer: null,
         wasQueueSyncing: @js($isSyncing),
         dismissedErrors: false,
+        isRepairingSync: false,
         lastMessage: '',
         lastMessageType: 'success',
         bootstrapHeadline() {
@@ -245,6 +246,29 @@
                 this.setMessage(error.message ?? 'Unable to start module sync.', 'error');
             } finally {
                 this.syncingModules[moduleKey] = false;
+            }
+        },
+        async repairSync() {
+            if (this.isRepairingSync || this.isQueueSyncing || this.isBootstrapping) {
+                return;
+            }
+
+            if (!window.confirm(
+                'This will push any pending local changes to the cloud and then re-download every resource fresh. '
+                + 'It can take several minutes for a busy store. Continue?'
+            )) {
+                return;
+            }
+
+            this.isRepairingSync = true;
+            this.lastMessage = '';
+
+            try {
+                await this.request(@js(route('startup.cloud.reconcile')), {});
+            } catch (error) {
+                this.setMessage(error.message ?? 'Unable to start repair sync.', 'error');
+            } finally {
+                this.isRepairingSync = false;
             }
         },
     }"
@@ -525,6 +549,30 @@
                     <a href="{{ route('startup.cloud.sync-log') }}" class="block w-full rounded-lg border border-slate-300 px-4 py-2 text-center text-sm font-medium text-slate-700 hover:bg-slate-100 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800">
                         Open Sync Log
                     </a>
+
+                    @if ($isCloudConnected)
+                        <button
+                            type="button"
+                            @click="repairSync"
+                            :disabled="isRepairingSync || isQueueSyncing || isBootstrapping"
+                            class="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-700 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200 dark:hover:bg-amber-500/20"
+                            title="Push any pending local changes and re-download every resource from the cloud. Use this if data appears to be missing or stale."
+                        >
+                            <svg
+                                x-show="isRepairingSync"
+                                xmlns="http://www.w3.org/2000/svg"
+                                class="h-4 w-4 animate-spin"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="2"
+                                aria-hidden="true"
+                            >
+                                <path d="M12 2v4m0 12v4m10-10h-4M6 12H2m16.95 6.95-2.83-2.83M7.88 7.88 5.05 5.05m13.9 0-2.83 2.83M7.88 16.12l-2.83 2.83"/>
+                            </svg>
+                            <span x-text="isRepairingSync ? 'Repairing…' : 'Repair Sync (advanced)'"></span>
+                        </button>
+                    @endif
                 </div>
             </div>
         </aside>

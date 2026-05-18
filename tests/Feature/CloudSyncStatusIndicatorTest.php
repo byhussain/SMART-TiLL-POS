@@ -19,8 +19,12 @@ it('shows green cloud icon when cloud is connected and all data is synced', func
 
     $contents = view('filament.store.partials.cloud-sync-status')->render();
 
+    // The icon is now a <button> that toggles the drawer; emerald colour is
+    // applied via $iconColorClass on the wrapper, and the inline svg keeps
+    // h-6 w-6 separately. Match both pieces independently.
     expect($contents)
-        ->toContain('h-6 w-6 text-emerald-600')
+        ->toContain('text-emerald-600')
+        ->toContain('class="h-6 w-6"')
         ->toContain('All synced');
 });
 

@@ -54,9 +54,12 @@ it('dispatches cloud sync job for cloud-connected local model changes', function
 
     app(DispatchCloudSyncObserver::class)->created($customer);
 
+    // Observer dispatches a push-only job (not a full delta) so observer-
+    // triggered syncs complete in ~1 second instead of running a heavy
+    // /delta roundtrip every time. The auto-sync poller covers the pull.
     Bus::assertDispatched(SyncCloudStoreData::class, function (SyncCloudStoreData $job) use ($store): bool {
         return $job->storeId === (int) $store->id
-            && $job->action === 'delta'
+            && $job->action === 'push'
             && $job->afterCommit === true
             && $job->resource === 'customers';
     });
@@ -112,7 +115,7 @@ it('dispatches the sales module sync when a local sale changes', function (): vo
 
     Bus::assertDispatched(SyncCloudStoreData::class, function (SyncCloudStoreData $job) use ($store): bool {
         return $job->storeId === (int) $store->id
-            && $job->action === 'delta'
+            && $job->action === 'push'
             && $job->module === 'sales'
             && $job->afterCommit === true
             && $job->resource === null;

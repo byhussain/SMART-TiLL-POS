@@ -3,7 +3,11 @@
 namespace App\Providers;
 
 use App\Observers\DispatchCloudSyncObserver;
+use Illuminate\Database\Connection;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Events\ConnectionEstablished;
+use Illuminate\Database\SQLiteConnection;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\ServiceProvider;
 use SmartTill\Core\Models\Attribute;
 use SmartTill\Core\Models\Brand;
@@ -40,6 +44,8 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        $this->hardenSqliteConnections();
+
         $observer = app(DispatchCloudSyncObserver::class);
 
         foreach ($this->syncObservedModels() as $modelClass) {
@@ -48,6 +54,62 @@ class AppServiceProvider extends ServiceProvider
             }
         }
 
+    }
+
+    /**
+     * Re-apply concurrency-critical PRAGMAs on every freshly-established
+     * SQLite connection. Laravel already sets `journal_mode`, `busy_timeout`,
+     * and `synchronous` from config/database.php — but this is belt-and-
+     * suspenders for cases where a connection is created outside the normal
+     * config path (NativePHP runtime DB reset, queue worker cold start on
+     * Windows, ad-hoc PDO from a sub-process). Without this hook those
+     * connections fall back to SQLite's defaults — `journal_mode=DELETE`
+     * and `busy_timeout=0` — which produces "database is locked" errors the
+     * moment two processes try to write concurrently.
+     */
+    private function hardenSqliteConnections(): void
+    {
+        Event::listen(function (ConnectionEstablished $event): void {
+            $connection = $event->connection;
+
+            if (! $connection instanceof SQLiteConnection) {
+                return;
+            }
+
+            $this->applySqliteHardeningPragmas($connection);
+        });
+
+        // Also apply to the already-resolved default connection on boot, in
+        // case it was opened before this listener registered (e.g. via early
+        // service-provider DB access).
+        try {
+            $defaultConnection = $this->app->make('db')->connection();
+            if ($defaultConnection instanceof SQLiteConnection) {
+                $this->applySqliteHardeningPragmas($defaultConnection);
+            }
+        } catch (\Throwable) {
+            // No DB available yet (e.g. running `artisan key:generate` with
+            // no DB file). Safe to ignore — the listener above will pick up
+            // the first real connection.
+        }
+    }
+
+    private function applySqliteHardeningPragmas(Connection $connection): void
+    {
+        try {
+            // Order matters: WAL must be set BEFORE busy_timeout so that
+            // SQLite's lock manager honours the timeout in WAL mode.
+            $connection->statement('PRAGMA journal_mode = WAL');
+            $connection->statement('PRAGMA busy_timeout = 60000');
+            $connection->statement('PRAGMA synchronous = NORMAL');
+            // Auto-checkpoint after ~1000 pages of WAL so the WAL file
+            // doesn't grow unbounded and stall checkpoints under load.
+            $connection->statement('PRAGMA wal_autocheckpoint = 1000');
+        } catch (\Throwable) {
+            // PRAGMA failure (e.g. read-only file) is non-fatal — Laravel's
+            // config-based PRAGMAs will have already tried, and an actual
+            // bad DB will surface a clearer error on the first real query.
+        }
     }
 
     /**

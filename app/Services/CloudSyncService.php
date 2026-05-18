@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Store;
 use App\Models\SyncOutbox;
 use Illuminate\Database\Query\Builder;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
@@ -688,6 +689,7 @@ class CloudSyncService
         }
 
         $pushed = $this->pushPendingRowsV2($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
+        $tombstoned = $this->pushTombstonesV2($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
 
         return [
             'ok' => true,
@@ -695,6 +697,62 @@ class CloudSyncService
             'module' => $module,
             'resource' => $resource,
             'pushed' => $pushed,
+            'tombstoned' => $tombstoned,
+        ];
+    }
+
+    /**
+     * One-shot repair for an existing install whose local data drifted from
+     * the cloud during the period when sync had bugs (line items dropped,
+     * pushes silenced by withoutEvents, etc.). Pushes anything still pending
+     * locally, then re-pulls every resource fresh (no `since` cursor) so the
+     * server's view becomes the local view for any rows the device missed.
+     *
+     * Safe to run multiple times — the underlying upserts are idempotent.
+     */
+    public function runForceReconcile(string $baseUrl, string $token, Store $localStore): array
+    {
+        $serverStoreId = (int) ($localStore->server_id ?? 0);
+        if ($serverStoreId <= 0) {
+            return ['ok' => false, 'message' => 'Local store is not linked with cloud store.'];
+        }
+
+        if (! $this->hasValidCloudToken($baseUrl, $token)) {
+            return ['ok' => false, 'message' => 'Cloud token is invalid or expired.'];
+        }
+
+        $localStoreId = (int) $localStore->id;
+
+        // Replay any previously parked inbound rows in case the missing
+        // dependency has since landed.
+        $this->processPendingInboundRows($localStoreId);
+
+        // Phase 1: ship anything the device still owes the cloud BEFORE we
+        // ask the cloud for a fresh view. Otherwise the next pull might
+        // re-overwrite local rows we just lost track of.
+        $pushed = $this->pushPendingRowsV2($baseUrl, $token, $serverStoreId, $localStoreId, self::PULL_ORDER);
+        $this->pushTombstonesV2($baseUrl, $token, $serverStoreId, $localStoreId, self::PULL_ORDER);
+
+        // Phase 2: pull every resource fresh. pullAllResources ignores the
+        // delta cursor — it walks the v1 paginated endpoint for each table,
+        // upserting rows in PULL_ORDER. Anything still missing dependencies
+        // gets parked in pending_inbound_sync_rows for the next sync.
+        $pulled = $this->pullAllResources($baseUrl, $token, $serverStoreId, $localStoreId, self::PULL_ORDER);
+
+        // Reset the delta cursor so the next regular sync starts from now,
+        // not from a stale "last successful delta" timestamp that might miss
+        // rows server-side.
+        $runtimeStateService = app(RuntimeStateService::class);
+        $runtimeStateService->updateStoreSyncState($localStoreId, [
+            'last_delta_pull_at' => now()->toDateTimeString(),
+        ]);
+        $runtimeStateService->touchLastSynced();
+
+        return [
+            'ok' => true,
+            'mode' => 'reconcile',
+            'pushed' => $pushed,
+            'pulled' => $pulled,
         ];
     }
 
@@ -713,6 +771,12 @@ class CloudSyncService
         if (! $this->hasValidCloudToken($baseUrl, $token)) {
             return ['ok' => false, 'message' => 'Cloud token is invalid or expired.'];
         }
+
+        // Replay any inbound rows that previous syncs couldn't resolve yet
+        // (e.g. sale_variation rows arrived before their parent variation).
+        // Doing this BEFORE the fresh delta means new resources we're about
+        // to pull can satisfy the missing dependencies of stale parked rows.
+        $this->processPendingInboundRows((int) $localStore->id);
 
         $resources = $resource !== null
             ? [$resource]
@@ -1445,6 +1509,155 @@ class CloudSyncService
                 break;
             }
         }
+
+        // Anything still unresolved after in-memory retries gets parked in a
+        // table so the NEXT sync cycle can try again. Previously these rows
+        // were silently dropped after 5 attempts — the visible symptom was
+        // "sales sync but their line items don't" when a new variation/stock
+        // referenced by the sale wasn't already in the local database.
+        if ($remaining !== []) {
+            $this->parkDeferredInboundRows($remaining, $localStoreId);
+        }
+    }
+
+    /**
+     * Persist deferred pulled rows for retry on subsequent sync cycles.
+     *
+     * @param  array<string, array<int, array<string, mixed>>>  $deferredRowsByResource
+     */
+    private function parkDeferredInboundRows(array $deferredRowsByResource, int $localStoreId): void
+    {
+        if (! Schema::hasTable('pending_inbound_sync_rows')) {
+            return;
+        }
+
+        $now = now();
+        $insertRows = [];
+
+        foreach ($deferredRowsByResource as $resource => $rows) {
+            foreach ($rows as $row) {
+                if (! is_array($row)) {
+                    continue;
+                }
+
+                $insertRows[] = [
+                    'resource' => $resource,
+                    'store_id' => $localStoreId,
+                    'payload' => json_encode($row),
+                    'attempts' => 0,
+                    'last_error' => 'Foreign-key dependencies missing locally; will retry on next sync.',
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ];
+            }
+        }
+
+        if ($insertRows === []) {
+            return;
+        }
+
+        // Chunk to keep prepared-statement bind counts sane.
+        foreach (array_chunk($insertRows, 100) as $batch) {
+            DB::table('pending_inbound_sync_rows')->insert($batch);
+        }
+    }
+
+    /**
+     * Re-apply any rows that previous sync runs couldn't resolve. Called at
+     * the start of every delta cycle so dependencies that arrived in later
+     * pulls (or were created locally) finally let the rows in.
+     */
+    private function processPendingInboundRows(int $localStoreId): void
+    {
+        if (! Schema::hasTable('pending_inbound_sync_rows')) {
+            return;
+        }
+
+        $stale = DB::table('pending_inbound_sync_rows')
+            ->where('store_id', $localStoreId)
+            ->where('attempts', '>=', 50)
+            ->pluck('id');
+
+        if ($stale->isNotEmpty()) {
+            // Permanently abandon rows that have failed dozens of times — at
+            // that point the dependency is genuinely missing on this device
+            // and a full bootstrap is the right recovery, not infinite retry.
+            DB::table('pending_inbound_sync_rows')->whereIn('id', $stale)->delete();
+        }
+
+        $pending = DB::table('pending_inbound_sync_rows')
+            ->where('store_id', $localStoreId)
+            ->orderByRaw('CASE resource '.$this->resourceOrderCase().' ELSE 999 END')
+            ->orderBy('id')
+            ->get();
+
+        if ($pending->isEmpty()) {
+            return;
+        }
+
+        $rowsByResource = [];
+        $idsByResource = [];
+
+        foreach ($pending as $entry) {
+            $payload = json_decode((string) $entry->payload, true);
+            if (! is_array($payload)) {
+                DB::table('pending_inbound_sync_rows')->where('id', $entry->id)->delete();
+
+                continue;
+            }
+
+            $resource = (string) $entry->resource;
+            $rowsByResource[$resource] ??= [];
+            $rowsByResource[$resource][] = $payload;
+            $idsByResource[$resource] ??= [];
+            $idsByResource[$resource][] = (int) $entry->id;
+        }
+
+        foreach (self::PULL_ORDER as $resource) {
+            $rows = $rowsByResource[$resource] ?? [];
+            if ($rows === []) {
+                continue;
+            }
+
+            $stillDeferred = $this->upsertPulledRows($resource, $rows, $localStoreId);
+            $resolvedCount = count($rows) - count($stillDeferred);
+
+            if ($resolvedCount > 0) {
+                // Wipe everything we had parked for this resource and
+                // re-park only what is still unresolved. Simpler and safer
+                // than trying to correlate individual rows to row-ids.
+                DB::table('pending_inbound_sync_rows')
+                    ->whereIn('id', $idsByResource[$resource])
+                    ->delete();
+
+                if ($stillDeferred !== []) {
+                    $this->parkDeferredInboundRows([$resource => $stillDeferred], $localStoreId);
+
+                    // Bump attempts counter on the freshly re-parked rows so
+                    // we can eventually give up.
+                    DB::table('pending_inbound_sync_rows')
+                        ->where('store_id', $localStoreId)
+                        ->where('resource', $resource)
+                        ->where('created_at', '>=', now()->subSecond())
+                        ->update(['attempts' => DB::raw('attempts + 1')]);
+                }
+            } else {
+                // Nothing resolved this round — just bump the attempts.
+                DB::table('pending_inbound_sync_rows')
+                    ->whereIn('id', $idsByResource[$resource])
+                    ->update(['attempts' => DB::raw('attempts + 1')]);
+            }
+        }
+    }
+
+    private function resourceOrderCase(): string
+    {
+        $cases = [];
+        foreach (self::PULL_ORDER as $index => $resource) {
+            $cases[] = 'WHEN '.DB::getPdo()->quote($resource)." THEN {$index}";
+        }
+
+        return implode(' ', $cases);
     }
 
     private function reconcileBootstrapResources(
@@ -1526,6 +1739,28 @@ class CloudSyncService
         $resourceList = $resources !== [] ? $resources : self::PULL_ORDER;
         $pushedCount = 0;
 
+        // Cross-process lock per (store, push) so two queue workers can't
+        // race on the same pending rows and double-post them to the server.
+        // Without this, the worker started by the observer and the worker
+        // started by the auto-sync poller can pick up the same row in the
+        // microsecond between SELECT and UPDATE-sync_state, both POST to
+        // /delta/upsert, and we get duplicate writes on the server.
+        $lock = Cache::lock("cloud-push-{$localStoreId}", 60);
+        if (! $lock->get()) {
+            return 0;
+        }
+
+        try {
+            return $this->doPushPendingRowsV2($baseUrl, $token, $serverStoreId, $localStoreId, $resourceList);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    private function doPushPendingRowsV2(string $baseUrl, string $token, int $serverStoreId, int $localStoreId, array $resourceList): int
+    {
+        $pushedCount = 0;
+
         foreach ($resourceList as $resource) {
             if (! Schema::hasTable($resource) || ! Schema::hasColumn($resource, 'sync_state')) {
                 continue;
@@ -1571,6 +1806,22 @@ class CloudSyncService
                 }
 
                 unset($payload['id'], $payload['sync_state'], $payload['synced_at'], $payload['sync_error']);
+
+                // Final defensive check: the payload must carry at least ONE
+                // identifier the server can match a row by. Otherwise the
+                // server's updateOrInsert has nothing to anchor on and will
+                // insert a new row that drifts away from our local one.
+                // This guards against rows that lost their local_id/server_id
+                // through some bug (e.g. a manual SQL fix).
+                if (! $this->payloadHasUsableIdentifier($resource, $payload)) {
+                    $this->updateLocalRowSyncStatus($resource, $row, [
+                        'sync_state' => 'failed',
+                        'sync_error' => 'Row has no server_id, local_id, or natural key — refusing to push as it would create a duplicate on the server.',
+                    ]);
+
+                    continue;
+                }
+
                 $payloadRows[] = $payload;
                 $rowsForResponse[] = $row;
             }
@@ -1641,6 +1892,124 @@ class CloudSyncService
         }
 
         return $pushedCount;
+    }
+
+    /**
+     * Drain pending delete tombstones from sync_outbox to the cloud server.
+     *
+     * Each tombstone identifies a row by server_id (preferred) or local_id
+     * (fallback) scoped to a store. The server soft-deletes the matching row
+     * so the existing outbound delta() flow can propagate the deletion to
+     * every OTHER device the next time they pull.
+     *
+     * Resources is the same allow-list used by push so that a per-module
+     * push (e.g. "customers") only flushes tombstones for that module.
+     */
+    private function pushTombstonesV2(string $baseUrl, string $token, int $serverStoreId, int $localStoreId, array $resources = []): int
+    {
+        if (! Schema::hasTable('sync_outbox')) {
+            return 0;
+        }
+
+        $resourceList = $resources !== [] ? $resources : self::PULL_ORDER;
+
+        $rows = DB::table('sync_outbox')
+            ->where('operation', 'delete')
+            ->whereIn('status', ['pending', 'failed'])
+            ->whereIn('entity_type', $resourceList)
+            ->orderBy('id')
+            ->limit(500)
+            ->get();
+
+        if ($rows->isEmpty()) {
+            return 0;
+        }
+
+        // Filter to tombstones that belong to THIS store (store_id is stashed
+        // in the payload JSON, since sync_outbox itself has no store column).
+        $tombstonePayload = [];
+        $rowsForResponse = [];
+
+        foreach ($rows as $row) {
+            $payload = is_string($row->payload) ? (array) json_decode($row->payload, true) : [];
+            $rowStoreId = (int) ($payload['store_id'] ?? 0);
+
+            if ($rowStoreId !== 0 && $rowStoreId !== $localStoreId) {
+                continue;
+            }
+
+            $serverId = $row->server_id !== null ? (int) $row->server_id : null;
+            $localIdString = isset($payload['local_id']) && $payload['local_id'] !== ''
+                ? (string) $payload['local_id']
+                : null;
+
+            if ($serverId === null && $localIdString === null) {
+                // Nothing to anchor on. Mark failed so it stops being retried.
+                DB::table('sync_outbox')->where('id', $row->id)->update([
+                    'status' => 'failed',
+                    'error' => 'Tombstone has neither server_id nor local_id.',
+                    'attempts' => (int) $row->attempts + 1,
+                    'updated_at' => now(),
+                ]);
+
+                continue;
+            }
+
+            $tombstonePayload[] = array_filter([
+                'resource' => (string) $row->entity_type,
+                'server_id' => $serverId,
+                'local_id' => $localIdString,
+            ], fn ($value) => $value !== null);
+            $rowsForResponse[] = $row;
+        }
+
+        if ($tombstonePayload === []) {
+            return 0;
+        }
+
+        $response = Http::baseUrl($baseUrl)
+            ->withToken($token)
+            ->acceptJson()
+            ->post("/api/pos/v2/stores/{$serverStoreId}/delta/tombstones", [
+                'tombstones' => $tombstonePayload,
+            ]);
+
+        if (! $response->successful()) {
+            $error = (string) ($response->json('message') ?? $response->body() ?: 'Unable to push tombstones.');
+
+            foreach ($rowsForResponse as $row) {
+                DB::table('sync_outbox')->where('id', $row->id)->update([
+                    'status' => 'failed',
+                    'error' => $error,
+                    'attempts' => (int) $row->attempts + 1,
+                    'updated_at' => now(),
+                ]);
+            }
+
+            return 0;
+        }
+
+        $results = collect((array) data_get($response->json(), 'results', []));
+        $tombstoned = 0;
+
+        foreach (array_values($rowsForResponse) as $index => $row) {
+            $result = $results->firstWhere('index', $index);
+            $status = (string) ($result['status'] ?? 'tombstoned');
+
+            if ($status === 'tombstoned') {
+                DB::table('sync_outbox')->where('id', $row->id)->delete();
+                $tombstoned++;
+            } else {
+                DB::table('sync_outbox')->where('id', $row->id)->update([
+                    'status' => 'failed',
+                    'error' => (string) ($result['error'] ?? 'Tombstone rejected by server.'),
+                    'attempts' => (int) $row->attempts + 1,
+                    'updated_at' => now(),
+                ]);
+            }
+        }
+
+        return $tombstoned;
     }
 
     private function findExistingLocalRow(string $table, array $payload, int $localStoreId): ?object
@@ -1717,14 +2086,14 @@ class CloudSyncService
             }
         }
 
-        // Echo window: just-pushed rows come back from the server on the next
-        // delta and silently corrupt fields the user (or local form save)
-        // already set. 5 minutes covers slow networks + clock skew.
-        $localSyncedAt = property_exists($localRow, 'synced_at') ? $localRow->synced_at : null;
-        $localSyncedTs = $this->toTimestamp($localSyncedAt);
-        if ($localSyncedTs !== null && $localSyncedTs > now()->subMinutes(5)->getTimestamp()) {
-            return true;
-        }
+        // Note: an earlier version of this method also rejected rows whose
+        // synced_at was within a "5-minute echo window". That over-blocked
+        // legitimate server updates whose only sin was that the local row
+        // had a fresh synced_at from a prior sync. The combination of (1)
+        // and the updated_at comparison below already prevents the original
+        // problem (local edits getting clobbered by server echoes) — if the
+        // user has edited the row, sync_state flips to pending OR
+        // updated_at advances, either of which blocks the overwrite.
 
         // Strict timestamp protection: if our copy is newer, keep it.
         $localUpdatedAt = property_exists($localRow, 'updated_at') ? $localRow->updated_at : null;
@@ -2559,5 +2928,26 @@ class CloudSyncService
         }
 
         return [];
+    }
+
+    /**
+     * Verify the outbound payload carries something the server can match a
+     * row by. Defensive last-mile check before POSTing to /delta/upsert so
+     * a malformed row can never accidentally create a duplicate on the
+     * server.
+     */
+    private function payloadHasUsableIdentifier(string $resource, array $payload): bool
+    {
+        if (is_numeric($payload['server_id'] ?? null) && (int) $payload['server_id'] > 0) {
+            return true;
+        }
+
+        if (filled($payload['local_id'] ?? null)) {
+            return true;
+        }
+
+        // Tables that match by natural composite key are fine without
+        // server_id/local_id — the server uses the same key to look them up.
+        return $this->resolveCompositeLookupForPulledRow($resource, $payload) !== [];
     }
 }
