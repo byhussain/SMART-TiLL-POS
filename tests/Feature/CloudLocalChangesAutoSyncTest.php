@@ -225,7 +225,13 @@ it('maintains local id counters per table for the same store and device', functi
     expect($service->makeForTable('sales', 1))->toBe('ABC123-2');
 });
 
-it('does not dispatch full-store sync for settings changes', function (): void {
+it('dispatches a scoped store_settings push (not full sync) when a setting changes', function (): void {
+    // Previously this test asserted no dispatch at all — but that was the
+    // buggy behavior: settings were pulled from the cloud and then any
+    // local edits silently vanished on the next sync because the observer
+    // never pushed them. Now the observer dispatches a resource-scoped push
+    // for store_settings so local edits actually reach the server, without
+    // triggering a heavy full-store sync.
     $store = Store::query()->create([
         'name' => 'Store A',
         'server_id' => 101,
@@ -252,7 +258,11 @@ it('does not dispatch full-store sync for settings changes', function (): void {
 
     app(DispatchCloudSyncObserver::class)->created($setting);
 
-    Bus::assertNotDispatched(SyncCloudStoreData::class);
+    Bus::assertDispatched(SyncCloudStoreData::class, function ($job) use ($store): bool {
+        return $job->storeId === $store->id
+            && $job->action === 'push'
+            && $job->resource === 'store_settings';
+    });
 });
 
 it('pushes pending table rows even when sync outbox is empty', function (): void {

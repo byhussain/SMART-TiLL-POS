@@ -10,6 +10,8 @@ use App\Support\SqliteWriteRetry;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use SmartTill\Core\Models\Image;
+use SmartTill\Core\Models\ModelActivity;
 use SmartTill\Core\Models\ProductAttribute;
 use SmartTill\Core\Models\PurchaseOrderProduct;
 use SmartTill\Core\Models\SalePreparableItem;
@@ -242,13 +244,60 @@ class DispatchCloudSyncObserver
                 ->value('store_id');
         }
 
+        // Image and ModelActivity are polymorphic — derive store_id by
+        // resolving the parent record they belong to.
+        if ($model instanceof Image || $model instanceof ModelActivity) {
+            $typeAttr = $model instanceof Image ? 'imageable_type' : 'activityable_type';
+            $idAttr = $model instanceof Image ? 'imageable_id' : 'activityable_id';
+
+            $morphType = (string) $model->getAttribute($typeAttr);
+            $morphId = (int) $model->getAttribute($idAttr);
+
+            if ($morphType === '' || $morphId <= 0) {
+                return 0;
+            }
+
+            $parentTable = $this->resolveMorphParentTable($morphType);
+            if ($parentTable === null || ! Schema::hasColumn($parentTable, 'store_id')) {
+                return 0;
+            }
+
+            return (int) DB::table($parentTable)->where('id', $morphId)->value('store_id');
+        }
+
         return 0;
+    }
+
+    /**
+     * Map an Eloquent morph alias (or FQCN) to its table name so we can
+     * climb to the owning store_id for polymorphic models.
+     */
+    private function resolveMorphParentTable(string $morphType): ?string
+    {
+        return match ($morphType) {
+            'App\\Models\\Customer', 'SmartTill\\Core\\Models\\Customer' => 'customers',
+            'App\\Models\\Supplier', 'SmartTill\\Core\\Models\\Supplier' => 'suppliers',
+            'App\\Models\\Sale', 'SmartTill\\Core\\Models\\Sale' => 'sales',
+            'App\\Models\\PurchaseOrder', 'SmartTill\\Core\\Models\\PurchaseOrder' => 'purchase_orders',
+            'App\\Models\\Payment', 'SmartTill\\Core\\Models\\Payment' => 'payments',
+            'App\\Models\\Product', 'SmartTill\\Core\\Models\\Product' => 'products',
+            'App\\Models\\Variation', 'SmartTill\\Core\\Models\\Variation' => 'variations',
+            default => null,
+        };
     }
 
     private function resolveResource(Model $model): ?string
     {
         return match (true) {
-            $model instanceof StoreSetting => null,
+            // StoreSetting/Image/ModelActivity used to fall through to null
+            // here, which meant edits made on the POS to these resources
+            // never reached the cloud. They ARE in PULL_ORDER and pulled
+            // every cycle, so the device would see the cloud version
+            // overwrite its local change on every sync.
+            $model instanceof StoreSetting => 'store_settings',
+            $model instanceof Image => 'images',
+            $model instanceof ModelActivity => 'model_activities',
+
             $model->getTable() === 'sales' => 'sales',
             $model instanceof SaleVariation => 'sale_variation',
             $model instanceof SalePreparableItem => 'sale_preparable_items',

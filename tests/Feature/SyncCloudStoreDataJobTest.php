@@ -30,6 +30,16 @@ it('records a failed sync_outbox row when background sync returns not ok', funct
     $runtimeStateService->shouldReceive('markBootstrapFailed')->once()->with($store->id, 'Unable to sync store.');
 
     $mock = Mockery::mock(CloudSyncService::class);
+    // Job's bootstrap action now tries the fast snapshot path first, then
+    // falls back to the legacy ndjson bootstrap when snapshot signals
+    // `fallback=ndjson`. Both must be mocked.
+    $mock->shouldReceive('runSnapshotBootstrap')
+        ->once()
+        ->andReturn([
+            'ok' => false,
+            'fallback' => 'ndjson',
+            'message' => 'Snapshot endpoint missing.',
+        ]);
     $mock->shouldReceive('runBootstrapSync')
         ->once()
         ->andReturn([

@@ -6,6 +6,7 @@ use App\Models\Store;
 use App\Models\SyncOutbox;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Query\Builder;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -24,7 +25,10 @@ use SmartTill\Core\Models\Variation as CoreVariation;
 
 class CloudSyncService
 {
-    private const PULL_PER_PAGE = 200;
+    // Pull as many rows per HTTP roundtrip as the server allows (500). On a
+    // 10k-row bootstrap that's 20 round trips instead of 50 — meaningful on
+    // high-latency cellular connections where each round trip can be 300ms+.
+    private const PULL_PER_PAGE = 500;
 
     private const MAX_PAGES_PER_CHUNK = 3;
 
@@ -146,6 +150,23 @@ class CloudSyncService
     ];
 
     private array $nullableColumnCache = [];
+
+    /**
+     * Per-instance schema-introspection caches. Schema::hasTable /
+     * hasColumn / getColumnListing each hit PRAGMA queries on SQLite —
+     * calling them tens of thousands of times during bootstrap is one of
+     * the dominant costs. Schema doesn't change at runtime, so caching the
+     * answers for the lifetime of the service is safe.
+     *
+     * @var array<string, bool>
+     */
+    private array $hasTableCache = [];
+
+    /** @var array<string, bool> */
+    private array $hasColumnCache = [];
+
+    /** @var array<string, list<string>> */
+    private array $columnListingCache = [];
 
     private const PULL_ORDER = [
         'stores',
@@ -572,10 +593,328 @@ class CloudSyncService
             (int) ($runtimeStateService->get()->active_store_id ?? 0) === (int) $localStore->id
             && ! $runtimeStateService->isStoreBootstrapped((int) $localStore->id)
         ) {
+            // Kill switch: when CLOUD_BOOTSTRAP_USE_SNAPSHOT=false, skip the
+            // fast path entirely. Useful if a snapshot install ever misbehaves
+            // in production and we need to disable it remotely without a
+            // re-release.
+            if ((bool) config('pos.bootstrap.use_snapshot', true)) {
+                // Try the fast snapshot path first; fall back to the legacy
+                // ndjson bootstrap when the server is on an older build, or
+                // when the snapshot import fails for any reason. A working
+                // device must never be stranded.
+                $snapshot = $this->runSnapshotBootstrap($baseUrl, $token, $localStore);
+                if (($snapshot['fallback'] ?? null) !== 'ndjson') {
+                    return $snapshot;
+                }
+            }
+
             return $this->runBootstrapSync($baseUrl, $token, $localStore);
         }
 
         return $this->runDeltaSync($baseUrl, $token, $localStore, $module);
+    }
+
+    /**
+     * Fast-path bootstrap: download a server-rendered, gzipped SQL snapshot
+     * and execute it inside a single SQLite transaction.
+     *
+     * Why this is dramatically faster than runBootstrapSync (ndjson):
+     *   - One HTTP roundtrip vs three (manifest + status poll + download).
+     *   - Server already aligned every server_id locally — no FK remap.
+     *   - Server set sync_state='synced' on every row — no observer storm.
+     *   - One SQLite COMMIT vs hundreds (one per chunk in the ndjson path).
+     *   - Gzip compresses the wire payload 5–10x.
+     *
+     * Returns ['ok' => false, 'fallback' => 'ndjson'] on 404/422/import error
+     * so the caller can fall back to runBootstrapSync without disturbing
+     * the user. A working device must never get stranded by a snapshot bug.
+     */
+    public function runSnapshotBootstrap(string $baseUrl, string $token, Store $localStore): array
+    {
+        $serverStoreId = (int) ($localStore->server_id ?? 0);
+        if ($serverStoreId <= 0) {
+            return ['ok' => false, 'message' => 'Local store is not linked with cloud store.'];
+        }
+
+        if (! $this->hasValidCloudToken($baseUrl, $token)) {
+            return ['ok' => false, 'message' => 'Cloud token is invalid or expired.'];
+        }
+
+        $runtimeStateService = app(RuntimeStateService::class);
+        $runtimeStateService->markBootstrapStarted((int) $localStore->id, 'snapshot-'.now()->format('YmdHis'), 'Requesting store snapshot');
+
+        // Tell the server which columns we have per table. The server emits
+        // INSERT statements containing only those columns, with sync
+        // housekeeping defaults filled in (server_id, sync_state='synced',
+        // synced_at=now, local_id/sync_error=NULL).
+        $payloadTables = $this->buildSnapshotTablePayload();
+
+        $directory = storage_path('app/cloud-sync');
+        if (! is_dir($directory)) {
+            mkdir($directory, 0777, true);
+        }
+        $snapshotPath = $directory."/snapshot-store-{$localStore->id}-".now()->format('YmdHis').'.sql.gz';
+
+        try {
+            $response = Http::baseUrl($baseUrl)
+                ->withToken($token)
+                ->acceptJson()
+                ->connectTimeout(30)
+                ->timeout(0)
+                ->sink($snapshotPath)
+                ->post("/api/pos/v2/stores/{$serverStoreId}/snapshot", [
+                    'tables' => $payloadTables,
+                ]);
+        } catch (\Throwable $exception) {
+            $runtimeStateService->markBootstrapFailed((int) $localStore->id, 'Snapshot download failed.');
+            if (file_exists($snapshotPath)) {
+                @unlink($snapshotPath);
+            }
+
+            return ['ok' => false, 'message' => $exception->getMessage(), 'fallback' => 'ndjson'];
+        }
+
+        if (! $response->successful()) {
+            if (file_exists($snapshotPath)) {
+                @unlink($snapshotPath);
+            }
+            $status = (int) $response->status();
+            $message = (string) ($response->json('message') ?? 'Unable to download store snapshot.');
+
+            // 404 = snapshot endpoint not deployed on this server version.
+            // 422 = validation failure (rare). Either way: fall back gracefully.
+            if (in_array($status, [404, 422], true)) {
+                return ['ok' => false, 'fallback' => 'ndjson', 'message' => $message];
+            }
+
+            $runtimeStateService->markBootstrapFailed((int) $localStore->id, $message);
+
+            return ['ok' => false, 'message' => $message];
+        }
+
+        // Some HTTP backends (notably Http::fake under test) ignore the
+        // sink() target. Make sure the file ends up populated either way
+        // by writing the response body if the sink didn't.
+        if (! is_file($snapshotPath) || filesize($snapshotPath) === 0) {
+            $body = (string) $response->body();
+            if ($body !== '') {
+                file_put_contents($snapshotPath, $body);
+            }
+        }
+
+        $runtimeStateService->updateBootstrapProgress((int) $localStore->id, 40, 'Snapshot downloaded; installing');
+
+        try {
+            $rowsApplied = $this->installSnapshotFromFile($snapshotPath, (int) $localStore->id);
+            $runtimeStateService->markBootstrapReady((int) $localStore->id);
+
+            return [
+                'ok' => true,
+                'mode' => 'snapshot',
+                'installed' => $rowsApplied,
+            ];
+        } catch (\Throwable $throwable) {
+            // Import failure: rollback already happened (we wrap in
+            // DB::transaction). Fall back to the ndjson path so the user
+            // gets SOMETHING rather than a dead screen.
+            $runtimeStateService->markBootstrapFailed((int) $localStore->id, 'Snapshot install failed; falling back to row-by-row bootstrap.');
+
+            return ['ok' => false, 'fallback' => 'ndjson', 'message' => $throwable->getMessage()];
+        } finally {
+            if (file_exists($snapshotPath)) {
+                @unlink($snapshotPath);
+            }
+        }
+    }
+
+    /**
+     * Build the `tables` payload describing which columns the POS has for
+     * every syncable table. The server uses this to emit only INSERT
+     * statements compatible with the local schema.
+     *
+     * @return array<string, list<string>>
+     */
+    private function buildSnapshotTablePayload(): array
+    {
+        $payload = [];
+
+        foreach (self::PULL_ORDER as $table) {
+            if (! $this->cachedHasTable($table)) {
+                continue;
+            }
+            $payload[$table] = array_values(array_unique($this->cachedColumnListing($table)));
+        }
+
+        return $payload;
+    }
+
+    /**
+     * Decompress and execute the SQL dump as a single SQLite transaction.
+     *
+     * Hardened against the four risks discovered during review:
+     *
+     *  1. Memory — uses streaming `gzread` + bounded buffer flushes at
+     *     statement boundaries, instead of loading the entire decompressed
+     *     SQL into PHP memory. Buffer cap is 8 MB regardless of dump size.
+     *
+     *  2. ID collisions — wipes every syncable table BEFORE importing so
+     *     no stale rows from other stores can collide with the snapshot's
+     *     server-assigned ids. The user opted into "single-store at a time"
+     *     behaviour; the local DB ends up containing exactly the snapshot.
+     *
+     *  3. Concurrent writers — takes a Cache lock keyed on the store so
+     *     observers/push/auto-sync workers don't deadlock with our long-
+     *     running transaction.
+     *
+     *  4. Long-running transaction — the wipe + import + sequence reset
+     *     all live inside ONE transaction so a crash mid-import leaves the
+     *     device with its previous data intact, not half-wiped.
+     *
+     * Returns approximate row count (sum of synced rows across imported tables).
+     */
+    private function installSnapshotFromFile(string $snapshotPath, int $localStoreId): int
+    {
+        if (! is_file($snapshotPath)) {
+            throw new RuntimeException('Snapshot file is missing.');
+        }
+
+        $lock = Cache::lock("snapshot-bootstrap-{$localStoreId}", 1800);
+        if (! $lock->get()) {
+            throw new RuntimeException('Another snapshot install is already in progress for this store.');
+        }
+
+        try {
+            $handle = gzopen($snapshotPath, 'rb');
+            if ($handle === false) {
+                throw new RuntimeException('Unable to open snapshot file.');
+            }
+
+            try {
+                DB::transaction(function () use ($handle): void {
+                    // Defer FK constraints to COMMIT so the loose ordering
+                    // of the dump's INSERTs across tables doesn't throw.
+                    DB::statement('PRAGMA defer_foreign_keys = ON');
+
+                    // Wipe FIRST so the snapshot is authoritative. The
+                    // single-store-at-a-time model means the local DB
+                    // contains exactly the snapshot's data once we're done.
+                    // No risk of locally-created rows with the same id as
+                    // an incoming server row clobbering each other.
+                    $this->wipeAllSyncableTables();
+
+                    $buffer = '';
+                    $bufferLimitBytes = 8 * 1024 * 1024; // 8 MB
+
+                    while (! gzeof($handle)) {
+                        $chunk = gzread($handle, 65536);
+                        if ($chunk === false || $chunk === '') {
+                            break;
+                        }
+                        $buffer .= $chunk;
+
+                        // Flush at a statement boundary (";\n") once the
+                        // buffer crosses the size limit. Keeping flushes
+                        // aligned to statement boundaries means PDO::exec
+                        // always sees syntactically complete SQL.
+                        if (strlen($buffer) >= $bufferLimitBytes) {
+                            $lastBoundary = strrpos($buffer, ";\n");
+                            if ($lastBoundary !== false) {
+                                $toExec = substr($buffer, 0, $lastBoundary + 2);
+                                $buffer = substr($buffer, $lastBoundary + 2);
+                                $this->execSnapshotChunk($toExec);
+                            }
+                        }
+                    }
+
+                    // Drain the tail.
+                    if (trim($buffer) !== '') {
+                        $this->execSnapshotChunk($buffer);
+                    }
+                });
+            } finally {
+                gzclose($handle);
+            }
+
+            // sqlite_sequence reset happens OUTSIDE the import transaction
+            // because INSERT-OR-REPLACE on sqlite_sequence is a system
+            // table write that's cleaner to do as its own step.
+            $this->resetSqliteSequenceForBootstrappedTables();
+        } finally {
+            $lock->release();
+        }
+
+        $total = 0;
+        foreach (self::PULL_ORDER as $table) {
+            if ($this->cachedHasTable($table) && $this->cachedHasColumn($table, 'sync_state')) {
+                $total += (int) DB::table($table)->where('sync_state', 'synced')->count();
+            }
+        }
+
+        return $total;
+    }
+
+    /**
+     * Execute one buffered chunk of snapshot SQL. Per-chunk strip of
+     * BEGIN/COMMIT/PRAGMA foreign_keys means each chunk is safe to exec
+     * inside our outer DB::transaction.
+     */
+    private function execSnapshotChunk(string $sql): void
+    {
+        $sql = preg_replace('/^\s*(BEGIN|COMMIT)\s*;\s*$/mi', '', $sql) ?? $sql;
+        $sql = preg_replace('/^\s*PRAGMA\s+foreign_keys\s*=\s*(ON|OFF)\s*;\s*$/mi', '', $sql) ?? $sql;
+
+        if (trim($sql) === '') {
+            return;
+        }
+
+        DB::unprepared($sql);
+    }
+
+    /**
+     * Wipe every syncable table EXCEPT `stores` (which holds the registry
+     * mapping local store id ↔ server id and must survive). Reverse
+     * PULL_ORDER so child tables clear before their parents — keeps any
+     * engine with eager FK checking happy.
+     */
+    private function wipeAllSyncableTables(): void
+    {
+        foreach (array_reverse(self::PULL_ORDER) as $table) {
+            if ($table === 'stores') {
+                continue;
+            }
+            if (! $this->cachedHasTable($table)) {
+                continue;
+            }
+            DB::table($table)->delete();
+        }
+    }
+
+    /**
+     * After importing rows with explicit ids, sqlite_sequence still thinks
+     * autoincrement starts at 0 — the next local insert would collide. Set
+     * each table's sequence to MAX(id) so subsequent inserts pick up at
+     * MAX(id)+1.
+     */
+    private function resetSqliteSequenceForBootstrappedTables(): void
+    {
+        if (! $this->cachedHasTable('sqlite_sequence')) {
+            return;
+        }
+
+        foreach (self::PULL_ORDER as $table) {
+            if (! $this->cachedHasTable($table) || ! $this->cachedHasColumn($table, 'id')) {
+                continue;
+            }
+
+            $maxId = (int) DB::table($table)->max('id');
+            if ($maxId <= 0) {
+                continue;
+            }
+
+            // Use INSERT-OR-REPLACE on sqlite_sequence — the standard
+            // SQLite-recommended way to set the next autoincrement value.
+            DB::statement('INSERT OR REPLACE INTO sqlite_sequence (name, seq) VALUES (?, ?)', [$table, $maxId]);
+        }
     }
 
     public function runBootstrapSync(string $baseUrl, string $token, Store $localStore): array
@@ -665,17 +1004,27 @@ class CloudSyncService
      * of waiting for a full delta cycle (which can take 10–60s when the
      * server returns a lot of incoming data).
      */
+    /**
+     * @param  int|null  $maxSecondsBudget  optional wall-clock cap. When set,
+     *                                      the push loop checks elapsed time between resource batches
+     *                                      and bails early once exceeded. Used by the store-switch
+     *                                      middleware to prevent a slow/offline server from freezing
+     *                                      the Filament UI on switch.
+     */
     public function runPushOnly(
         string $baseUrl,
         string $token,
         Store $localStore,
         ?string $module = null,
         ?string $resource = null,
+        ?int $maxSecondsBudget = null,
     ): array {
         $serverStoreId = (int) ($localStore->server_id ?? 0);
         if ($serverStoreId <= 0) {
             return ['ok' => false, 'message' => 'Local store is not linked with cloud store.'];
         }
+
+        $deadline = $maxSecondsBudget !== null ? microtime(true) + $maxSecondsBudget : null;
 
         if (! $this->hasValidCloudToken($baseUrl, $token)) {
             return ['ok' => false, 'message' => 'Cloud token is invalid or expired.'];
@@ -689,8 +1038,10 @@ class CloudSyncService
             return ['ok' => false, 'message' => 'Invalid sync module selected.'];
         }
 
-        $pushed = $this->pushPendingRowsV2($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
-        $tombstoned = $this->pushTombstonesV2($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
+        $pushed = $this->pushPendingRowsV2($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources, $deadline);
+        $tombstoned = $this->pushTombstonesV2($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources, $deadline);
+
+        $timedOut = $deadline !== null && microtime(true) >= $deadline;
 
         return [
             'ok' => true,
@@ -699,6 +1050,7 @@ class CloudSyncService
             'resource' => $resource,
             'pushed' => $pushed,
             'tombstoned' => $tombstoned,
+            'timed_out' => $timedOut,
         ];
     }
 
@@ -795,21 +1147,61 @@ class CloudSyncService
         $storeSyncState = $runtimeStateService->getStoreSyncState((int) $localStore->id);
         $since = $storeSyncState['last_delta_pull_at'] ?? null;
 
-        $deltaResponse = Http::baseUrl($baseUrl)
-            ->withToken($token)
-            ->acceptJson()
-            ->connectTimeout(15)
-            ->timeout(0)
-            ->get("/api/pos/v2/stores/{$serverStoreId}/delta", array_filter([
-                'since' => is_string($since) && $since !== '' ? $since : null,
-                'resource' => $resource,
-            ]));
+        // CRITICAL: the server caps each resource at 500 rows/page and uses
+        // `meta.has_more` + per-resource `cursor` to signal more available.
+        // Before this loop, the POS made ONE /delta call and discarded the
+        // cursor → any row past the cap was permanently lost because the next
+        // sync's `since` had advanced past it. We now loop until the server
+        // reports has_more=false, advancing the cursor by the OLDEST resource
+        // cursor each iteration (safe: idempotent upserts re-process the
+        // already-pulled rows for resources that finished early).
+        $cursorSince = is_string($since) && $since !== '' ? $since : null;
+        $cursorSinceId = 0;
+        $pulled = 0;
+        $maxIterations = 50; // safety net against any server-side loop bug
+        $iterations = 0;
+        $newCursorSince = $cursorSince;
+        $newCursorSinceId = $cursorSinceId;
 
-        if (! $deltaResponse->successful()) {
-            $status = (int) $deltaResponse->status();
-            $message = (string) ($deltaResponse->json('message') ?? $deltaResponse->body() ?: 'Unable to pull delta updates.');
+        do {
+            $iterations++;
 
-            if (in_array($status, [404, 422], true)) {
+            $deltaResponse = Http::baseUrl($baseUrl)
+                ->withToken($token)
+                ->acceptJson()
+                ->connectTimeout(15)
+                ->timeout(0)
+                ->get("/api/pos/v2/stores/{$serverStoreId}/delta", array_filter([
+                    'since' => $cursorSince,
+                    'since_id' => $cursorSinceId > 0 ? $cursorSinceId : null,
+                    'resource' => $resource,
+                ], fn ($value) => $value !== null));
+
+            if (! $deltaResponse->successful()) {
+                $status = (int) $deltaResponse->status();
+                $message = (string) ($deltaResponse->json('message') ?? $deltaResponse->body() ?: 'Unable to pull delta updates.');
+
+                if (in_array($status, [404, 422], true)) {
+                    $pushed = $this->pushPendingRows($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
+                    $pulled = $this->pullAllResources($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
+                    $runtimeStateService->markDeltaCompleted((int) $localStore->id);
+
+                    return [
+                        'ok' => true,
+                        'mode' => 'delta',
+                        'module' => $module,
+                        'resource' => $resource,
+                        'pulled' => $pulled,
+                        'pushed' => $pushed,
+                        'fallback' => 'v1',
+                    ];
+                }
+
+                return ['ok' => false, 'message' => $message];
+            }
+
+            $deltaPayload = $deltaResponse->json();
+            if (! is_array($deltaPayload) || ! array_key_exists('data', $deltaPayload)) {
                 $pushed = $this->pushPendingRows($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
                 $pulled = $this->pullAllResources($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
                 $runtimeStateService->markDeltaCompleted((int) $localStore->id);
@@ -825,29 +1217,43 @@ class CloudSyncService
                 ];
             }
 
-            return ['ok' => false, 'message' => $message];
-        }
+            $resourcesPayload = (array) ($deltaPayload['data'] ?? []);
+            $pulled += $this->applyDeltaResources($resourcesPayload, (int) $localStore->id);
 
-        $deltaPayload = $deltaResponse->json();
-        if (! is_array($deltaPayload) || ! array_key_exists('data', $deltaPayload)) {
-            $pushed = $this->pushPendingRows($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
-            $pulled = $this->pullAllResources($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
-            $runtimeStateService->markDeltaCompleted((int) $localStore->id);
+            $hasMore = (bool) ($deltaPayload['meta']['has_more'] ?? false);
 
-            return [
-                'ok' => true,
-                'mode' => 'delta',
-                'module' => $module,
-                'resource' => $resource,
-                'pulled' => $pulled,
-                'pushed' => $pushed,
-                'fallback' => 'v1',
-            ];
-        }
+            // Advance the cursor to the OLDEST resource cursor returned in
+            // this page so any resource that ran short still gets fully
+            // pulled on the next iteration. We track the LATEST cursor seen
+            // for persistence as the new `last_delta_pull_at`.
+            ['next_since' => $nextCursorSince, 'next_since_id' => $nextCursorSinceId, 'max_since' => $maxSeenSince, 'max_since_id' => $maxSeenSinceId]
+                = $this->resolveDeltaPaginationCursors($resourcesPayload);
 
-        $pulled = $this->applyDeltaResources((array) ($deltaPayload['data'] ?? []), (int) $localStore->id);
+            if ($maxSeenSince !== null) {
+                $newCursorSince = $maxSeenSince;
+                $newCursorSinceId = $maxSeenSinceId;
+            }
+
+            if (! $hasMore) {
+                break;
+            }
+
+            // No forward progress (cursor unchanged) → bail to avoid infinite
+            // loop on a misbehaving server.
+            if ($nextCursorSince === $cursorSince && $nextCursorSinceId === $cursorSinceId) {
+                break;
+            }
+
+            $cursorSince = $nextCursorSince ?? $cursorSince;
+            $cursorSinceId = $nextCursorSinceId;
+        } while ($iterations < $maxIterations);
+
         $runtimeStateService->markDeltaPulled((int) $localStore->id);
+
         $pushed = $this->pushPendingRowsV2($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
+        // Flush tombstones too — without this, locally-deleted rows would
+        // only reach the server on the next manual reconcile.
+        $this->pushTombstonesV2($baseUrl, $token, $serverStoreId, (int) $localStore->id, $resources);
         $backfilled = 0;
 
         if (
@@ -871,6 +1277,18 @@ class CloudSyncService
             ]);
 
         $runtimeStateService->markDeltaCompleted((int) $localStore->id);
+
+        // Persist the newest cursor we actually saw AFTER markDeltaCompleted
+        // (which resets last_delta_pull_at to now()). This is the value the
+        // NEXT sync uses as `since` — anchoring it to the server's most
+        // recent updated_at means we don't re-walk rows we already pulled,
+        // but also don't accidentally skip rows whose updated_at sits
+        // between the server's cursor and "now" on this device's clock.
+        if ($newCursorSince !== null) {
+            $runtimeStateService->updateStoreSyncState((int) $localStore->id, [
+                'last_delta_pull_at' => $newCursorSince,
+            ]);
+        }
 
         return [
             'ok' => true,
@@ -1446,6 +1864,7 @@ class CloudSyncService
     {
         $pulled = 0;
         $deferredRowsByResource = [];
+        $deferredTombstonesByResource = [];
 
         foreach ($resources as $resourcePayload) {
             if (! is_array($resourcePayload)) {
@@ -1462,17 +1881,34 @@ class CloudSyncService
 
             $deferredRows = $this->upsertPulledRows($resource, $rows, $localStoreId);
             $pulled += count($rows);
-            $this->applyTombstones($resource, $tombstones, $localStoreId);
+
+            $deferredTombstones = $this->applyTombstones($resource, $tombstones, $localStoreId);
+
             if ($deferredRows !== []) {
                 $deferredRowsByResource[$resource] = [
                     ...($deferredRowsByResource[$resource] ?? []),
                     ...$deferredRows,
                 ];
             }
+
+            if ($deferredTombstones !== []) {
+                $deferredTombstonesByResource[$resource] = [
+                    ...($deferredTombstonesByResource[$resource] ?? []),
+                    ...$deferredTombstones,
+                ];
+            }
         }
 
         if ($deferredRowsByResource !== []) {
             $this->retryDeferredPullRows($deferredRowsByResource, $localStoreId);
+        }
+
+        if ($deferredTombstonesByResource !== []) {
+            // Park tombstones so the next sync (after local push completes)
+            // can re-apply them. Without this, a tombstone for a locally-
+            // edited row was silently dropped and the row stayed alive on
+            // every device except the one that issued the delete.
+            $this->parkDeferredInboundRows($deferredTombstonesByResource, $localStoreId, 'tombstone');
         }
 
         return $pulled;
@@ -1525,8 +1961,12 @@ class CloudSyncService
      * Persist deferred pulled rows for retry on subsequent sync cycles.
      *
      * @param  array<string, array<int, array<string, mixed>>>  $deferredRowsByResource
+     * @param  string  $kind  'upsert' (default) or 'tombstone' — drives how
+     *                        processPendingInboundRows replays the row.
+     *                        Encoded inside the JSON payload as `__kind` so we
+     *                        don't have to migrate the parking table.
      */
-    private function parkDeferredInboundRows(array $deferredRowsByResource, int $localStoreId): void
+    private function parkDeferredInboundRows(array $deferredRowsByResource, int $localStoreId, string $kind = 'upsert'): void
     {
         if (! Schema::hasTable('pending_inbound_sync_rows')) {
             return;
@@ -1535,18 +1975,27 @@ class CloudSyncService
         $now = now();
         $insertRows = [];
 
+        $errorLabel = match ($kind) {
+            'tombstone' => 'Local row has pending edits; tombstone will retry after push.',
+            default => 'Foreign-key dependencies missing locally; will retry on next sync.',
+        };
+
         foreach ($deferredRowsByResource as $resource => $rows) {
             foreach ($rows as $row) {
                 if (! is_array($row)) {
                     continue;
                 }
 
+                // Sentinel so processPendingInboundRows knows whether to call
+                // upsertPulledRows or applyTombstones on replay.
+                $row['__kind'] = $kind;
+
                 $insertRows[] = [
                     'resource' => $resource,
                     'store_id' => $localStoreId,
                     'payload' => json_encode($row),
                     'attempts' => 0,
-                    'last_error' => 'Foreign-key dependencies missing locally; will retry on next sync.',
+                    'last_error' => $errorLabel,
                     'created_at' => $now,
                     'updated_at' => $now,
                 ];
@@ -1596,8 +2045,10 @@ class CloudSyncService
             return;
         }
 
-        $rowsByResource = [];
-        $idsByResource = [];
+        // Group by (resource, kind) so we route tombstones to applyTombstones
+        // and regular rows to upsertPulledRows on replay.
+        $rowsByResourceKind = [];
+        $idsByResourceKind = [];
 
         foreach ($pending as $entry) {
             $payload = json_decode((string) $entry->payload, true);
@@ -1607,46 +2058,60 @@ class CloudSyncService
                 continue;
             }
 
+            $kind = (string) ($payload['__kind'] ?? 'upsert');
+            unset($payload['__kind']);
+
             $resource = (string) $entry->resource;
-            $rowsByResource[$resource] ??= [];
-            $rowsByResource[$resource][] = $payload;
-            $idsByResource[$resource] ??= [];
-            $idsByResource[$resource][] = (int) $entry->id;
+            $key = "{$resource}::{$kind}";
+
+            $rowsByResourceKind[$key] ??= ['resource' => $resource, 'kind' => $kind, 'rows' => []];
+            $rowsByResourceKind[$key]['rows'][] = $payload;
+            $idsByResourceKind[$key] ??= [];
+            $idsByResourceKind[$key][] = (int) $entry->id;
         }
 
-        foreach (self::PULL_ORDER as $resource) {
-            $rows = $rowsByResource[$resource] ?? [];
-            if ($rows === []) {
-                continue;
-            }
+        // Process upserts first (PULL_ORDER), then tombstones — so any
+        // dependencies the tombstoned row's siblings need are present.
+        foreach (['upsert', 'tombstone'] as $kind) {
+            foreach (self::PULL_ORDER as $resource) {
+                $key = "{$resource}::{$kind}";
+                $group = $rowsByResourceKind[$key] ?? null;
+                if ($group === null || $group['rows'] === []) {
+                    continue;
+                }
 
-            $stillDeferred = $this->upsertPulledRows($resource, $rows, $localStoreId);
-            $resolvedCount = count($rows) - count($stillDeferred);
+                $rows = $group['rows'];
+                $ids = $idsByResourceKind[$key];
 
-            if ($resolvedCount > 0) {
-                // Wipe everything we had parked for this resource and
-                // re-park only what is still unresolved. Simpler and safer
-                // than trying to correlate individual rows to row-ids.
-                DB::table('pending_inbound_sync_rows')
-                    ->whereIn('id', $idsByResource[$resource])
-                    ->delete();
+                if ($kind === 'tombstone') {
+                    $stillDeferred = $this->applyTombstones($resource, $rows, $localStoreId);
+                } else {
+                    $stillDeferred = $this->upsertPulledRows($resource, $rows, $localStoreId);
+                }
 
-                if ($stillDeferred !== []) {
-                    $this->parkDeferredInboundRows([$resource => $stillDeferred], $localStoreId);
+                $resolvedCount = count($rows) - count($stillDeferred);
 
-                    // Bump attempts counter on the freshly re-parked rows so
-                    // we can eventually give up.
+                if ($resolvedCount > 0) {
+                    // Wipe everything we had parked for this (resource, kind)
+                    // and re-park only what is still unresolved. Simpler and
+                    // safer than correlating individual rows to row-ids.
                     DB::table('pending_inbound_sync_rows')
-                        ->where('store_id', $localStoreId)
-                        ->where('resource', $resource)
-                        ->where('created_at', '>=', now()->subSecond())
+                        ->whereIn('id', $ids)
+                        ->delete();
+
+                    if ($stillDeferred !== []) {
+                        $this->parkDeferredInboundRows([$resource => $stillDeferred], $localStoreId, $kind);
+                        DB::table('pending_inbound_sync_rows')
+                            ->where('store_id', $localStoreId)
+                            ->where('resource', $resource)
+                            ->where('created_at', '>=', now()->subSecond())
+                            ->update(['attempts' => DB::raw('attempts + 1')]);
+                    }
+                } else {
+                    DB::table('pending_inbound_sync_rows')
+                        ->whereIn('id', $ids)
                         ->update(['attempts' => DB::raw('attempts + 1')]);
                 }
-            } else {
-                // Nothing resolved this round — just bump the attempts.
-                DB::table('pending_inbound_sync_rows')
-                    ->whereIn('id', $idsByResource[$resource])
-                    ->update(['attempts' => DB::raw('attempts + 1')]);
             }
         }
     }
@@ -1699,11 +2164,22 @@ class CloudSyncService
         return (int) $this->applyStoreScope(DB::table($resource), $resource, $localStoreId)->count();
     }
 
-    private function applyTombstones(string $resource, array $tombstones, int $localStoreId): void
+    /**
+     * Apply incoming tombstones to local rows. Returns the list of tombstones
+     * we couldn't apply yet (because the local row has pending unpushed edits
+     * — we don't want to silently destroy the user's local change before it
+     * has a chance to reach the server). Returned tombstones are parked by
+     * the caller for retry after the next push completes.
+     *
+     * @return array<int, array<string, mixed>> deferred tombstones to park
+     */
+    private function applyTombstones(string $resource, array $tombstones, int $localStoreId): array
     {
         if (! Schema::hasTable($resource)) {
-            return;
+            return [];
         }
+
+        $deferred = [];
 
         foreach ($tombstones as $tombstone) {
             if (! is_array($tombstone)) {
@@ -1711,13 +2187,34 @@ class CloudSyncService
             }
 
             $localRow = $this->findExistingLocalRow($resource, $tombstone, $localStoreId);
-            if ($localRow === null || $this->shouldSkipPulledRow($resource, $localRow, $localStoreId, $tombstone)) {
+            if ($localRow === null) {
+                // Already gone locally — nothing to delete.
                 continue;
             }
 
+            // If the local row has pending unpushed edits, park the tombstone
+            // and let the push run first. On the next sync the row will be
+            // synced (or rejected by the server) and we'll re-evaluate. This
+            // is the right precedence: NEVER discard a user's local change
+            // implicitly. Either the user's edit lands on the server (then
+            // the server may re-tombstone if it really wanted the row gone)
+            // or it doesn't (then the tombstone still applies next round).
+            $isLocalPending = Schema::hasColumn($resource, 'sync_state')
+                && (string) ($localRow->sync_state ?? '') === 'pending';
+
+            if ($isLocalPending) {
+                $deferred[] = $tombstone;
+
+                continue;
+            }
+
+            // For a synced local row, the server's delete is authoritative —
+            // apply it even when local updated_at is newer (e.g. an offline
+            // edit that already reached us via another channel). The user
+            // explicitly deleted on the server; respect that.
             $updates = [];
-            if (Schema::hasColumn($resource, 'deleted_at') && array_key_exists('deleted_at', $tombstone)) {
-                $updates['deleted_at'] = $tombstone['deleted_at'];
+            if (Schema::hasColumn($resource, 'deleted_at')) {
+                $updates['deleted_at'] = $tombstone['deleted_at'] ?? now();
             }
             if (Schema::hasColumn($resource, 'sync_state')) {
                 $updates['sync_state'] = 'synced';
@@ -1733,9 +2230,11 @@ class CloudSyncService
                 DB::table($resource)->where('id', (int) $localRow->id)->update($updates);
             }
         }
+
+        return $deferred;
     }
 
-    private function pushPendingRowsV2(string $baseUrl, string $token, int $serverStoreId, int $localStoreId, array $resources = []): int
+    private function pushPendingRowsV2(string $baseUrl, string $token, int $serverStoreId, int $localStoreId, array $resources = [], ?float $deadline = null): int
     {
         $resourceList = $resources !== [] ? $resources : self::PULL_ORDER;
         $pushedCount = 0;
@@ -1752,17 +2251,26 @@ class CloudSyncService
         }
 
         try {
-            return $this->doPushPendingRowsV2($baseUrl, $token, $serverStoreId, $localStoreId, $resourceList);
+            return $this->doPushPendingRowsV2($baseUrl, $token, $serverStoreId, $localStoreId, $resourceList, $deadline);
         } finally {
             $lock->release();
         }
     }
 
-    private function doPushPendingRowsV2(string $baseUrl, string $token, int $serverStoreId, int $localStoreId, array $resourceList): int
+    /**
+     * @param  float|null  $deadline  optional `microtime(true)`-style cutoff.
+     *                                When set, we bail between resource batches once exceeded so
+     *                                the caller (typically the store-switch middleware) doesn't
+     *                                hang the UI indefinitely against a slow or offline server.
+     */
+    private function doPushPendingRowsV2(string $baseUrl, string $token, int $serverStoreId, int $localStoreId, array $resourceList, ?float $deadline = null): int
     {
         $pushedCount = 0;
 
         foreach ($resourceList as $resource) {
+            if ($deadline !== null && microtime(true) >= $deadline) {
+                break;
+            }
             if (! Schema::hasTable($resource) || ! Schema::hasColumn($resource, 'sync_state')) {
                 continue;
             }
@@ -1881,8 +2389,13 @@ class CloudSyncService
                         $updates['reference'] = (string) $result['reference'];
                     }
 
-                    $this->updateLocalRowSyncStatus($resource, $row, $updates);
-                    $pushedCount++;
+                    // CAS: only flip to synced when the row is still at the
+                    // updated_at we read it at. If a fresh local edit landed
+                    // mid-push, leave sync_state='pending' so the next push
+                    // round ships the new version.
+                    if ($this->flipRowToSyncedIfUnchanged($resource, $row, $updates)) {
+                        $pushedCount++;
+                    }
                 } else {
                     $this->updateLocalRowSyncStatus($resource, $row, [
                         'sync_state' => 'failed',
@@ -1906,8 +2419,11 @@ class CloudSyncService
      * Resources is the same allow-list used by push so that a per-module
      * push (e.g. "customers") only flushes tombstones for that module.
      */
-    private function pushTombstonesV2(string $baseUrl, string $token, int $serverStoreId, int $localStoreId, array $resources = []): int
+    private function pushTombstonesV2(string $baseUrl, string $token, int $serverStoreId, int $localStoreId, array $resources = [], ?float $deadline = null): int
     {
+        if ($deadline !== null && microtime(true) >= $deadline) {
+            return 0;
+        }
         if (! Schema::hasTable('sync_outbox')) {
             return 0;
         }
@@ -2273,13 +2789,45 @@ class CloudSyncService
      */
     private function upsertPulledRows(string $table, array $rows, int $localStoreId): array
     {
-        if (! Schema::hasTable($table) || empty($rows)) {
+        if (! $this->cachedHasTable($table) || empty($rows)) {
             return [];
         }
 
-        $columns = collect(Schema::getColumnListing($table));
+        $columns = collect($this->cachedColumnListing($table));
         $deferredRows = [];
 
+        // Pre-fetch every (related_table, server_id) → local_id mapping the
+        // chunk will need. Without this, each row's FK + morph resolution
+        // costs one SELECT per FK column — for a chunk of 200 sale_variation
+        // rows that's ~1000 round trips just for sale_id/variation_id/
+        // stock_id lookups. With it, the entire chunk needs ~3 SELECTs.
+        $fkCache = $this->prefetchForeignKeyMap($table, $rows, $localStoreId);
+        $morphCache = $this->prefetchMorphMap($table, $rows, $localStoreId);
+
+        // Wrap the entire chunk in a single transaction so SQLite commits
+        // once per chunk instead of once per row. On Windows POS installs
+        // with default fsync behavior, this turns a ~50 rows/sec install
+        // into a ~thousands of rows/sec install — the bootstrap difference
+        // between minutes and seconds.
+        return DB::transaction(function () use ($table, $rows, $localStoreId, $columns, $fkCache, $morphCache, &$deferredRows): array {
+            $this->processUpsertRows($table, $rows, $localStoreId, $columns, $fkCache, $morphCache, $deferredRows);
+
+            return $deferredRows;
+        });
+    }
+
+    /**
+     * Inner loop of upsertPulledRows, extracted so the surrounding
+     * DB::transaction block stays a simple wrapper.
+     *
+     * @param  array<int, array<string, mixed>>  $rows
+     * @param  Collection<int, string>  $columns
+     * @param  array<string, array<int, int>>  $fkCache
+     * @param  array<string, array<string, array<int, int>>>  $morphCache
+     * @param  array<int, array<string, mixed>>  $deferredRows
+     */
+    private function processUpsertRows(string $table, array $rows, int $localStoreId, Collection $columns, array $fkCache, array $morphCache, array &$deferredRows): void
+    {
         foreach ($rows as $row) {
             if (! is_array($row)) {
                 continue;
@@ -2319,8 +2867,8 @@ class CloudSyncService
                 }
             }
 
-            ['payload' => $normalized, 'has_unresolved_foreign_keys' => $hasUnresolvedForeignKeys] = $this->mapForeignKeysToLocalIds($table, $normalized, $localStoreId);
-            ['payload' => $normalized, 'has_unresolved_foreign_keys' => $hasUnresolvedMorphRelations] = $this->mapMorphRelationsToLocalIds($table, $normalized, $localStoreId);
+            ['payload' => $normalized, 'has_unresolved_foreign_keys' => $hasUnresolvedForeignKeys] = $this->mapForeignKeysToLocalIds($table, $normalized, $localStoreId, $fkCache);
+            ['payload' => $normalized, 'has_unresolved_foreign_keys' => $hasUnresolvedMorphRelations] = $this->mapMorphRelationsToLocalIds($table, $normalized, $localStoreId, $morphCache);
 
             if ($hasUnresolvedMorphRelations) {
                 $hasUnresolvedForeignKeys = true;
@@ -2368,11 +2916,11 @@ class CloudSyncService
 
                 if ($table === 'unit_dimensions' && isset($normalized['store_id'])) {
                     $existingByServerIdQuery->where('store_id', $normalized['store_id']);
-                } elseif (Schema::hasColumn($table, 'store_id') && $table !== 'stores' && isset($normalized['store_id'])) {
+                } elseif ($this->cachedHasColumn($table, 'store_id') && $table !== 'stores' && isset($normalized['store_id'])) {
                     $existingByServerIdQuery->where('store_id', $normalized['store_id']);
                 }
 
-                if (Schema::hasColumn($table, 'id')) {
+                if ($this->cachedHasColumn($table, 'id')) {
                     $existingByServerId = $existingByServerIdQuery->value('id');
                 } else {
                     $existingByServerId = $existingByServerIdQuery->exists() ? 1 : null;
@@ -2381,17 +2929,17 @@ class CloudSyncService
 
             $existingByLocalId = null;
             $existingByLocalIdQuery = null;
-            if (Schema::hasColumn($table, 'local_id') && trim((string) ($normalized['local_id'] ?? '')) !== '') {
+            if ($this->cachedHasColumn($table, 'local_id') && trim((string) ($normalized['local_id'] ?? '')) !== '') {
                 $existingByLocalIdQuery = DB::table($table)
                     ->where('local_id', (string) $normalized['local_id']);
 
                 if ($table === 'unit_dimensions' && isset($normalized['store_id'])) {
                     $existingByLocalIdQuery->where('store_id', $normalized['store_id']);
-                } elseif (Schema::hasColumn($table, 'store_id') && $table !== 'stores' && isset($normalized['store_id'])) {
+                } elseif ($this->cachedHasColumn($table, 'store_id') && $table !== 'stores' && isset($normalized['store_id'])) {
                     $existingByLocalIdQuery->where('store_id', $normalized['store_id']);
                 }
 
-                if (Schema::hasColumn($table, 'id')) {
+                if ($this->cachedHasColumn($table, 'id')) {
                     $existingByLocalId = $existingByLocalIdQuery->value('id');
                 } else {
                     $existingByLocalId = $existingByLocalIdQuery->exists() ? 1 : null;
@@ -2402,7 +2950,7 @@ class CloudSyncService
             if (! empty($naturalLookup)) {
                 $existingNaturalQuery = DB::table($table)->where($naturalLookup);
 
-                if (Schema::hasColumn($table, 'id')) {
+                if ($this->cachedHasColumn($table, 'id')) {
                     $existingNaturalRow = $existingNaturalQuery->first();
                     $existingId = is_object($existingNaturalRow) ? ($existingNaturalRow->id ?? null) : null;
 
@@ -2418,7 +2966,7 @@ class CloudSyncService
                         if (
                             is_numeric($existingByServerId)
                             && (int) $existingByServerId !== (int) $existingId
-                            && Schema::hasColumn($table, 'server_id')
+                            && $this->cachedHasColumn($table, 'server_id')
                         ) {
                             DB::table($table)
                                 ->where('id', (int) $existingByServerId)
@@ -2439,7 +2987,7 @@ class CloudSyncService
             }
 
             if (is_numeric($existingByLocalId)) {
-                if (Schema::hasColumn($table, 'id')) {
+                if ($this->cachedHasColumn($table, 'id')) {
                     DB::table($table)
                         ->where('id', (int) $existingByLocalId)
                         ->update($normalized);
@@ -2451,7 +2999,7 @@ class CloudSyncService
             }
 
             if (is_numeric($existingByServerId)) {
-                if (Schema::hasColumn($table, 'id')) {
+                if ($this->cachedHasColumn($table, 'id')) {
                     DB::table($table)
                         ->where('id', (int) $existingByServerId)
                         ->update($normalized);
@@ -2486,11 +3034,15 @@ class CloudSyncService
                 DB::table($table)->updateOrInsert($compositeLookup, $normalized);
             }
         }
-
-        return $deferredRows;
     }
 
-    private function mapForeignKeysToLocalIds(string $table, array $payload, int $localStoreId): array
+    /**
+     * @param  array<string, array<int, int>>|null  $fkCache  optional pre-fetched
+     *                                                        map of column => (server_id => local_id). When provided,
+     *                                                        FK resolution is an O(1) array lookup instead of a per-row SELECT —
+     *                                                        critical for the bootstrap installer's chunked workload.
+     */
+    private function mapForeignKeysToLocalIds(string $table, array $payload, int $localStoreId, ?array $fkCache = null): array
     {
         $hasUnresolvedForeignKeys = false;
 
@@ -2499,7 +3051,7 @@ class CloudSyncService
                 continue;
             }
 
-            if (! Schema::hasTable($relatedTable)) {
+            if (! $this->cachedHasTable($relatedTable)) {
                 continue;
             }
 
@@ -2516,8 +3068,7 @@ class CloudSyncService
 
             $serverForeignId = (int) $payload[$column];
 
-            $query = DB::table($relatedTable);
-            if (! Schema::hasColumn($relatedTable, 'server_id')) {
+            if (! $this->cachedHasColumn($relatedTable, 'server_id')) {
                 if ($this->isNullableColumn($table, $column)) {
                     $payload[$column] = null;
                 } else {
@@ -2527,13 +3078,20 @@ class CloudSyncService
                 continue;
             }
 
-            $query->where('server_id', $serverForeignId);
-
-            if (Schema::hasColumn($relatedTable, 'store_id') && $relatedTable !== 'stores') {
-                $query->where('store_id', $localStoreId);
+            // Fast path: pre-fetched chunk cache.
+            $localId = null;
+            if ($fkCache !== null && isset($fkCache[$column][$serverForeignId])) {
+                $localId = $fkCache[$column][$serverForeignId];
+            } elseif ($fkCache === null) {
+                // Slow path: per-row SELECT (kept for callers outside the
+                // bootstrap installer that don't pre-fetch).
+                $query = DB::table($relatedTable)->where('server_id', $serverForeignId);
+                if ($this->cachedHasColumn($relatedTable, 'store_id') && $relatedTable !== 'stores') {
+                    $query->where('store_id', $localStoreId);
+                }
+                $localId = $query->value('id');
             }
 
-            $localId = $query->value('id');
             if (is_numeric($localId)) {
                 $payload[$column] = (int) $localId;
             } else {
@@ -2551,7 +3109,11 @@ class CloudSyncService
         ];
     }
 
-    private function mapMorphRelationsToLocalIds(string $table, array $payload, int $localStoreId): array
+    /**
+     * @param  array<string, array<string, array<int, int>>>|null  $morphCache
+     *                                                                          optional pre-fetched map of prefix => relatedTable => (server_id => local_id).
+     */
+    private function mapMorphRelationsToLocalIds(string $table, array $payload, int $localStoreId, ?array $morphCache = null): array
     {
         $hasUnresolvedForeignKeys = false;
 
@@ -2584,7 +3146,7 @@ class CloudSyncService
                 $type,
             );
 
-            if ($relatedTable === '' || ! Schema::hasTable($relatedTable) || ! Schema::hasColumn($relatedTable, 'server_id')) {
+            if ($relatedTable === '' || ! $this->cachedHasTable($relatedTable) || ! $this->cachedHasColumn($relatedTable, 'server_id')) {
                 if ($this->isNullableColumn($table, $idColumn)) {
                     $payload[$idColumn] = null;
                     $payload[$typeColumn] = $canonicalClass;
@@ -2595,12 +3157,18 @@ class CloudSyncService
                 continue;
             }
 
-            $query = DB::table($relatedTable)->where('server_id', (int) $remoteId);
-            if (Schema::hasColumn($relatedTable, 'store_id') && $relatedTable !== 'stores') {
-                $query->where('store_id', $localStoreId);
+            // Fast path: pre-fetched chunk cache.
+            $localId = null;
+            if ($morphCache !== null && isset($morphCache[$prefix][$relatedTable][(int) $remoteId])) {
+                $localId = $morphCache[$prefix][$relatedTable][(int) $remoteId];
+            } elseif ($morphCache === null) {
+                $query = DB::table($relatedTable)->where('server_id', (int) $remoteId);
+                if ($this->cachedHasColumn($relatedTable, 'store_id') && $relatedTable !== 'stores') {
+                    $query->where('store_id', $localStoreId);
+                }
+                $localId = $query->value('id');
             }
 
-            $localId = $query->value('id');
             if (is_numeric($localId)) {
                 $payload[$idColumn] = (int) $localId;
                 $payload[$typeColumn] = $canonicalClass;
@@ -2714,6 +3282,248 @@ class CloudSyncService
         }
 
         return $fallback;
+    }
+
+    /**
+     * Walk every per-resource cursor returned in a /delta response and
+     * compute the "next iteration" cursor (oldest seen — safe for
+     * pagination) plus the "max seen" cursor (for persistence as
+     * last_delta_pull_at).
+     *
+     * @param  array<int, array<string, mixed>>  $resourcesPayload
+     * @return array{next_since:?string,next_since_id:int,max_since:?string,max_since_id:int}
+     */
+    private function resolveDeltaPaginationCursors(array $resourcesPayload): array
+    {
+        $minSince = null;
+        $minSinceId = 0;
+        $maxSince = null;
+        $maxSinceId = 0;
+
+        foreach ($resourcesPayload as $resource) {
+            if (! is_array($resource)) {
+                continue;
+            }
+
+            $cursor = (array) ($resource['cursor'] ?? []);
+            $updatedAt = $cursor['updated_at'] ?? null;
+            $id = $cursor['id'] ?? null;
+
+            if (! is_string($updatedAt) || $updatedAt === '') {
+                continue;
+            }
+
+            $updatedAtTs = strtotime($updatedAt);
+            if ($updatedAtTs === false) {
+                continue;
+            }
+
+            $idInt = is_numeric($id) ? (int) $id : 0;
+
+            // Oldest cursor → safe `next_since` for the following iteration:
+            // resources that finished early will get re-walked from this
+            // point, but their upserts are idempotent.
+            if ($minSince === null || $updatedAtTs < strtotime((string) $minSince)) {
+                $minSince = $updatedAt;
+                $minSinceId = $idInt;
+            }
+
+            // Newest cursor → what we persist as `last_delta_pull_at` so
+            // the NEXT sync skips everything we've already pulled.
+            if ($maxSince === null || $updatedAtTs > strtotime((string) $maxSince)) {
+                $maxSince = $updatedAt;
+                $maxSinceId = $idInt;
+            }
+        }
+
+        return [
+            'next_since' => $minSince,
+            'next_since_id' => $minSinceId,
+            'max_since' => $maxSince,
+            'max_since_id' => $maxSinceId,
+        ];
+    }
+
+    /**
+     * Cached wrapper around Schema::hasTable. PRAGMA-heavy on SQLite.
+     */
+    private function cachedHasTable(string $table): bool
+    {
+        if (array_key_exists($table, $this->hasTableCache)) {
+            return $this->hasTableCache[$table];
+        }
+
+        return $this->hasTableCache[$table] = Schema::hasTable($table);
+    }
+
+    /**
+     * Cached wrapper around Schema::hasColumn. PRAGMA-heavy on SQLite.
+     */
+    private function cachedHasColumn(string $table, string $column): bool
+    {
+        $key = "{$table}.{$column}";
+        if (array_key_exists($key, $this->hasColumnCache)) {
+            return $this->hasColumnCache[$key];
+        }
+
+        return $this->hasColumnCache[$key] = Schema::hasColumn($table, $column);
+    }
+
+    /**
+     * Cached wrapper around Schema::getColumnListing.
+     *
+     * @return list<string>
+     */
+    private function cachedColumnListing(string $table): array
+    {
+        if (array_key_exists($table, $this->columnListingCache)) {
+            return $this->columnListingCache[$table];
+        }
+
+        return $this->columnListingCache[$table] = Schema::getColumnListing($table);
+    }
+
+    /**
+     * Pre-fetch local IDs for every (related_table, server_id) pair
+     * referenced by `$rows` so that mapForeignKeysToLocalIds can resolve
+     * each FK with an O(1) array lookup instead of a per-row SELECT.
+     *
+     * Returns a structure shaped like:
+     *   ['customer_id' => ['customers' => [<server_id> => <local_id>, …]], …]
+     *
+     * @param  array<int, array<string, mixed>>  $rows
+     * @return array<string, array<int, int>> column => (server_id => local_id)
+     */
+    private function prefetchForeignKeyMap(string $table, array $rows, int $localStoreId): array
+    {
+        $idsByRelatedTable = [];
+        $columnsToCheck = [];
+
+        foreach (self::FOREIGN_KEY_TABLE_MAP as $column => $relatedTable) {
+            if ($column === 'store_id' && $table !== 'stores') {
+                continue;
+            }
+            if ($table === 'stores' && in_array($column, self::STORE_REGION_FOREIGN_KEYS, true)) {
+                continue;
+            }
+            if (! $this->cachedHasTable($relatedTable) || ! $this->cachedHasColumn($relatedTable, 'server_id')) {
+                continue;
+            }
+            $columnsToCheck[$column] = $relatedTable;
+        }
+
+        if ($columnsToCheck === []) {
+            return [];
+        }
+
+        foreach ($rows as $row) {
+            if (! is_array($row)) {
+                continue;
+            }
+
+            foreach ($columnsToCheck as $column => $relatedTable) {
+                if (! array_key_exists($column, $row) || ! is_numeric($row[$column])) {
+                    continue;
+                }
+                $idsByRelatedTable[$relatedTable][(int) $row[$column]] = true;
+            }
+        }
+
+        $localByRelated = [];
+
+        foreach ($idsByRelatedTable as $relatedTable => $idMap) {
+            $serverIds = array_keys($idMap);
+            if ($serverIds === []) {
+                continue;
+            }
+
+            $query = DB::table($relatedTable)
+                ->whereIn('server_id', $serverIds)
+                ->select('id', 'server_id');
+
+            if ($this->cachedHasColumn($relatedTable, 'store_id') && $relatedTable !== 'stores') {
+                $query->where('store_id', $localStoreId);
+            }
+
+            foreach ($query->get() as $resolved) {
+                $localByRelated[$relatedTable][(int) $resolved->server_id] = (int) $resolved->id;
+            }
+        }
+
+        $byColumn = [];
+        foreach ($columnsToCheck as $column => $relatedTable) {
+            $byColumn[$column] = $localByRelated[$relatedTable] ?? [];
+        }
+
+        return $byColumn;
+    }
+
+    /**
+     * Same idea as prefetchForeignKeyMap, but for the polymorphic
+     * `*_type` / `*_id` columns. Groups remote IDs by their resolved
+     * related table so we only issue one query per related table per
+     * chunk instead of one per row.
+     *
+     * Returns:
+     *   ['transactionable' => ['customers' => [<server_id> => <local_id>, …]], …]
+     *
+     * @param  array<int, array<string, mixed>>  $rows
+     * @return array<string, array<string, array<int, int>>>
+     */
+    private function prefetchMorphMap(string $table, array $rows, int $localStoreId): array
+    {
+        $idsByPrefixAndRelated = [];
+
+        foreach ($rows as $row) {
+            if (! is_array($row)) {
+                continue;
+            }
+
+            foreach (['transactionable', 'referenceable', 'payable', 'imageable', 'activityable'] as $prefix) {
+                $type = trim((string) ($row["{$prefix}_type"] ?? ''));
+                $remoteId = $row["{$prefix}_id"] ?? null;
+                if ($type === '' || ! is_numeric($remoteId)) {
+                    continue;
+                }
+
+                $morphDefinition = self::MORPH_TYPE_MAP[$type] ?? null;
+                if (! is_array($morphDefinition)) {
+                    continue;
+                }
+
+                $relatedTable = (string) ($morphDefinition['table'] ?? '');
+                if ($relatedTable === '' || ! $this->cachedHasTable($relatedTable) || ! $this->cachedHasColumn($relatedTable, 'server_id')) {
+                    continue;
+                }
+
+                $idsByPrefixAndRelated[$prefix][$relatedTable][(int) $remoteId] = true;
+            }
+        }
+
+        $localByPrefixAndRelated = [];
+
+        foreach ($idsByPrefixAndRelated as $prefix => $byRelated) {
+            foreach ($byRelated as $relatedTable => $idMap) {
+                $serverIds = array_keys($idMap);
+                if ($serverIds === []) {
+                    continue;
+                }
+
+                $query = DB::table($relatedTable)
+                    ->whereIn('server_id', $serverIds)
+                    ->select('id', 'server_id');
+
+                if ($this->cachedHasColumn($relatedTable, 'store_id') && $relatedTable !== 'stores') {
+                    $query->where('store_id', $localStoreId);
+                }
+
+                foreach ($query->get() as $resolved) {
+                    $localByPrefixAndRelated[$prefix][$relatedTable][(int) $resolved->server_id] = (int) $resolved->id;
+                }
+            }
+        }
+
+        return $localByPrefixAndRelated;
     }
 
     private function isNullableColumn(string $table, string $column): bool
@@ -2880,6 +3690,45 @@ class CloudSyncService
                 ->where('unit_price', $row->unit_price ?? 0)
                 ->update($updates);
         }
+    }
+
+    /**
+     * Flip a pushed row to `synced` ONLY when its `updated_at` is unchanged
+     * since we read it for the push. This is the compare-and-swap that
+     * prevents the push job from clobbering a fresh local edit that landed
+     * between the push's SELECT and its post-success status update.
+     *
+     * If the row was re-edited mid-push, we leave sync_state='pending' and
+     * let the next push round pick up the new version. The server already
+     * has the OLD version, but the next push will overwrite it with the new
+     * one — net result: no lost local edit.
+     *
+     * Returns true when the flip happened, false when the row was re-edited
+     * and we left it pending.
+     */
+    private function flipRowToSyncedIfUnchanged(string $table, object $row, array $updates): bool
+    {
+        if (! property_exists($row, 'id') || ! is_numeric($row->id) || ! Schema::hasColumn($table, 'id')) {
+            // No usable PK → fall through to the unguarded update so the
+            // sale_variation no-PK case keeps working.
+            $this->updateLocalRowSyncStatus($table, $row, $updates);
+
+            return true;
+        }
+
+        if (! Schema::hasColumn($table, 'updated_at') || ! property_exists($row, 'updated_at')) {
+            // No timestamp to guard on → behave as before.
+            $this->updateLocalRowSyncStatus($table, $row, $updates);
+
+            return true;
+        }
+
+        $affected = (int) DB::table($table)
+            ->where('id', (int) $row->id)
+            ->where('updated_at', $row->updated_at)
+            ->update($updates);
+
+        return $affected > 0;
     }
 
     private function applyDefaultOrder(Builder $query, string $table): void

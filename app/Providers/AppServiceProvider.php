@@ -13,6 +13,8 @@ use SmartTill\Core\Models\Attribute;
 use SmartTill\Core\Models\Brand;
 use SmartTill\Core\Models\Category;
 use SmartTill\Core\Models\Customer;
+use SmartTill\Core\Models\Image;
+use SmartTill\Core\Models\ModelActivity;
 use SmartTill\Core\Models\Payment;
 use SmartTill\Core\Models\Product;
 use SmartTill\Core\Models\ProductAttribute;
@@ -137,6 +139,11 @@ class AppServiceProvider extends ServiceProvider
             SalePreparableItem::class,
             Payment::class,
             Transaction::class,
+            // Image / ModelActivity were pulled but not pushed, so local
+            // edits silently lost on every cloud sync. Registering them here
+            // hooks them into the same observer pipeline as everything else.
+            Image::class,
+            ModelActivity::class,
         ];
     }
 }

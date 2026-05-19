@@ -99,10 +99,11 @@ class SyncCloudStoreData implements ShouldBeUnique, ShouldQueue
             }
 
             $result = match ($action) {
-                'bootstrap' => $cloudSyncService->runBootstrapSync(
+                'bootstrap' => $this->runBootstrapWithSnapshotPreferred(
+                    $cloudSyncService,
                     (string) $state->cloud_base_url,
                     (string) $state->cloud_token,
-                    $store
+                    $store,
                 ),
                 'push' => $cloudSyncService->runPushOnly(
                     (string) $state->cloud_base_url,
@@ -168,6 +169,33 @@ class SyncCloudStoreData implements ShouldBeUnique, ShouldQueue
                 ->dontRelease()
                 ->expireAfter(1800),
         ];
+    }
+
+    /**
+     * Try the fast snapshot bootstrap first; fall back to the legacy
+     * ndjson bootstrap when the snapshot endpoint isn't available on the
+     * server (older build) or when the snapshot import fails for any
+     * reason. A working device must never get stranded by a snapshot bug.
+     *
+     * Honors the CLOUD_BOOTSTRAP_USE_SNAPSHOT config kill switch — set to
+     * false to skip the snapshot path entirely without a re-release.
+     *
+     * @return array<string, mixed>
+     */
+    private function runBootstrapWithSnapshotPreferred(
+        CloudSyncService $cloudSyncService,
+        string $baseUrl,
+        string $token,
+        Store $store,
+    ): array {
+        if ((bool) config('pos.bootstrap.use_snapshot', true)) {
+            $snapshot = $cloudSyncService->runSnapshotBootstrap($baseUrl, $token, $store);
+            if (($snapshot['fallback'] ?? null) !== 'ndjson') {
+                return $snapshot;
+            }
+        }
+
+        return $cloudSyncService->runBootstrapSync($baseUrl, $token, $store);
     }
 
     private function recordFailure(int $storeId, string $error, string $action): void
