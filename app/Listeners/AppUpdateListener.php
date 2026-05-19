@@ -4,28 +4,19 @@ namespace App\Listeners;
 
 use App\Jobs\SyncCloudStoreData;
 use App\Services\RuntimeStateService;
-use Native\Desktop\Events\AutoUpdater\Error as UpdateError;
-use Native\Desktop\Events\AutoUpdater\UpdateAvailable;
-use Native\Desktop\Events\AutoUpdater\UpdateDownloaded;
-use Native\Desktop\Events\AutoUpdater\UpdateNotAvailable;
 use Native\Desktop\Events\Menu\MenuItemClicked;
-use Native\Desktop\Facades\AutoUpdater;
 use Native\Desktop\Facades\Notification;
 
 /**
- * Thin wrapper around NativePHP's official AutoUpdater. The menu bar has a
- * single "Check for Updates…" item; everything else (download, install on
- * next launch) is handled by Electron's built-in electron-updater.
+ * Handles menu-bar click events for the desktop app.
  *
- * Flow:
- *   1. User picks Help → Check for Updates…
- *   2. AutoUpdater::checkForUpdates() pings GitHub releases.
- *   3. Electron downloads any newer version in the background (default
- *      auto-download behaviour of electron-updater).
- *   4. We surface 4 lightweight OS notifications so the user knows what is
- *      happening — no modal dialogs, no custom UI to maintain.
- *   5. On the next normal app restart electron-updater installs the staged
- *      update automatically.
+ * The NativePHP auto-updater menu entry ("Help → Check for Updates…") was
+ * removed because the updater on Windows uninstalled the running app and
+ * then failed to install the replacement, leaving clients without a working
+ * POS. Until the updater is proven safe, updates are distributed manually.
+ *
+ * The MENU_ITEM_ID constant is kept so any older menu definition that still
+ * references it can short-circuit gracefully.
  */
 class AppUpdateListener
 {
@@ -37,51 +28,9 @@ class AppUpdateListener
     {
         $id = (string) ($event->item['id'] ?? '');
 
-        if ($id === self::MENU_ITEM_ID) {
-            Notification::title('SMART TiLL POS')
-                ->message('Checking for updates…')
-                ->show();
-
-            AutoUpdater::checkForUpdates();
-
-            return;
-        }
-
         if ($id === self::MENU_ITEM_SYNC_NOW) {
             $this->triggerCloudSyncNow();
         }
-    }
-
-    public function handleUpdateAvailable(UpdateAvailable $event): void
-    {
-        Notification::title('Update available')
-            ->message("Downloading version {$event->version} in the background.")
-            ->show();
-    }
-
-    public function handleUpdateNotAvailable(UpdateNotAvailable $event): void
-    {
-        Notification::title('Up to date')
-            ->message("You're running the latest version ({$event->version}).")
-            ->show();
-    }
-
-    public function handleUpdateDownloaded(UpdateDownloaded $event): void
-    {
-        Notification::title('Update ready')
-            ->message("Version {$event->version} will be installed the next time you restart SMART TiLL POS.")
-            ->show();
-    }
-
-    public function handleUpdateError(UpdateError $event): void
-    {
-        $message = trim((string) ($event->message ?? '')) !== ''
-            ? (string) $event->message
-            : 'Unknown error';
-
-        Notification::title('Update check failed')
-            ->message($message)
-            ->show();
     }
 
     /**

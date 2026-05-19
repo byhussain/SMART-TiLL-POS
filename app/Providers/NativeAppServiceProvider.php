@@ -6,10 +6,6 @@ use App\Listeners\AppUpdateListener;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Event;
 use Native\Desktop\Contracts\ProvidesPhpIni;
-use Native\Desktop\Events\AutoUpdater\Error as UpdateError;
-use Native\Desktop\Events\AutoUpdater\UpdateAvailable;
-use Native\Desktop\Events\AutoUpdater\UpdateDownloaded;
-use Native\Desktop\Events\AutoUpdater\UpdateNotAvailable;
 use Native\Desktop\Events\Menu\MenuItemClicked;
 use Native\Desktop\Facades\Menu;
 use Native\Desktop\Facades\Window;
@@ -25,15 +21,18 @@ class NativeAppServiceProvider implements ProvidesPhpIni
         Artisan::call('native:core:install');
 
         $this->registerMenuBar();
-        $this->registerUpdateListeners();
+        $this->registerMenuClickListener();
 
         Window::open();
     }
 
     /**
-     * Build the system menu bar. Adds a "Help" menu with a "Check for
-     * Updates…" item that triggers the AutoUpdater workflow handled by
-     * AppUpdateListener.
+     * Build the system menu bar. The "Check for Updates…" item used to live
+     * here, but the NativePHP auto-updater on Windows uninstalled the running
+     * app and then failed to install the replacement, leaving clients with a
+     * removed POS. The menu entry, its click handler, and the underlying
+     * AutoUpdater event listeners have all been removed until the updater is
+     * proven safe on Windows. Updates are now distributed manually.
      */
     private function registerMenuBar(): void
     {
@@ -48,23 +47,18 @@ class NativeAppServiceProvider implements ProvidesPhpIni
                     ->id(AppUpdateListener::MENU_ITEM_SYNC_NOW)
                     ->accelerator('CmdOrCtrl+Shift+S'),
             ),
-            Menu::label('Help')->submenu(
-                Menu::label('Check for Updates…')
-                    ->id(AppUpdateListener::MENU_ITEM_ID),
-            ),
         );
     }
 
     /**
-     * Wire AutoUpdater + menu-click events to the AppUpdateListener methods.
+     * Wire menu-click events to the listener. The listener still routes the
+     * Sync Now menu item; the auto-updater wiring was removed because the
+     * NativePHP updater on Windows uninstalled the app without successfully
+     * reinstalling, leaving clients without a working POS.
      */
-    private function registerUpdateListeners(): void
+    private function registerMenuClickListener(): void
     {
         Event::listen(MenuItemClicked::class, [AppUpdateListener::class, 'handleMenuClick']);
-        Event::listen(UpdateAvailable::class, [AppUpdateListener::class, 'handleUpdateAvailable']);
-        Event::listen(UpdateNotAvailable::class, [AppUpdateListener::class, 'handleUpdateNotAvailable']);
-        Event::listen(UpdateDownloaded::class, [AppUpdateListener::class, 'handleUpdateDownloaded']);
-        Event::listen(UpdateError::class, [AppUpdateListener::class, 'handleUpdateError']);
     }
 
     /**

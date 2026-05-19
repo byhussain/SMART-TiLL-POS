@@ -391,6 +391,12 @@ it('maps variation transaction morph ids and types to local values during delta 
 
     expect($result['ok'])->toBeTrue();
 
+    // Canonicalize to whatever Eloquent uses locally for this class. The
+    // CoreServiceProvider morphMap registers App\Models\* aliases for the
+    // host-app classes (Customer, Supplier, Sale, …) but NOT for Variation
+    // — so Eloquent stores the FQCN for variation transactions, and the
+    // bootstrap must store the same FQCN to keep the running-balance query
+    // matching across both flows.
     $this->assertDatabaseHas('transactions', [
         'server_id' => 901,
         'transactionable_type' => 'SmartTill\\Core\\Models\\Variation',

@@ -178,9 +178,14 @@ it('does not map pull foreign keys by raw local ids when related table has no se
     $result = app(CloudSyncService::class)->syncNow('https://cloud.example.test', 'token', $store);
 
     expect($result['ok'])->toBeTrue();
+    // The activityable_type is canonicalized to the Eloquent morph ALIAS
+    // (App\Models\Sale) so that future queries filtering by this column —
+    // most importantly TransactionObserver's running-balance lookup for
+    // its non-activity siblings — agree on the same string the local app
+    // writes when creating fresh rows.
     $this->assertDatabaseHas('model_activities', [
         'server_id' => 900,
-        'activityable_type' => 'SmartTill\\Core\\Models\\Sale',
+        'activityable_type' => 'App\\Models\\Sale',
         'activityable_id' => 55,
         'created_by' => null,
         'updated_by' => null,

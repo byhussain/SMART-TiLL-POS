@@ -8,7 +8,7 @@ return [
      * It is used to determine if the app needs to be updated.
      * Increment this value every time you release a new version of your app.
      */
-    'version' => '2.0.0',
+    'version' => '2.0.1',
 
     /**
      * The ID of your application. This should be a unique identifier
@@ -99,7 +99,11 @@ return [
          * updater will only work when your application is bundled
          * for production.
          */
-        'enabled' => env('NATIVEPHP_UPDATER_ENABLED', true),
+        // Disabled by default — the Electron auto-updater on Windows
+        // uninstalled the running app and then failed to install the
+        // replacement, leaving clients without a working POS. Re-enable
+        // only after the updater has been verified end-to-end on Windows.
+        'enabled' => env('NATIVEPHP_UPDATER_ENABLED', false),
 
         /**
          * The updater provider to use.
