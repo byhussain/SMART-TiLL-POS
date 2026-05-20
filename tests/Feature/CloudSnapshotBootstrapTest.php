@@ -40,6 +40,7 @@ INSERT INTO "customers" ("id","name","phone","store_id","created_at","updated_at
 (102,'Bob''s Bakery',NULL,81,'2026-05-19 00:00:00','2026-05-19 00:00:00',102,'synced','2026-05-19 12:00:00',NULL,NULL);
 COMMIT;
 PRAGMA foreign_keys=ON;
+-- SNAPSHOT_END store=81
 SQL;
     $snapshotPath = storage_path('app/cloud-sync/test-snapshot.sql.gz');
     @mkdir(dirname($snapshotPath), 0777, true);
@@ -179,6 +180,7 @@ it('wipes all syncable tables before importing so stale rows from a prior store 
     $sql = <<<'SQL'
 INSERT OR REPLACE INTO "customers" ("id","name","phone","store_id","created_at","updated_at","server_id","sync_state","synced_at","local_id","sync_error") VALUES
 (999,'Fresh from snapshot','5550999',95,'2026-05-19 00:00:00','2026-05-19 00:00:00',999,'synced','2026-05-19 12:00:00',NULL,NULL);
+-- SNAPSHOT_END store=95
 SQL;
 
     Http::fake([
@@ -209,7 +211,7 @@ it('refuses to import a snapshot when another import is already holding the lock
     expect($lock->get())->toBeTrue();
 
     try {
-        $sql = "INSERT OR REPLACE INTO \"customers\" (\"id\",\"name\",\"phone\",\"store_id\",\"created_at\",\"updated_at\",\"server_id\",\"sync_state\",\"synced_at\",\"local_id\",\"sync_error\") VALUES (1,'X','111',96,'2026-05-19','2026-05-19',1,'synced','2026-05-19',NULL,NULL);";
+        $sql = "INSERT OR REPLACE INTO \"customers\" (\"id\",\"name\",\"phone\",\"store_id\",\"created_at\",\"updated_at\",\"server_id\",\"sync_state\",\"synced_at\",\"local_id\",\"sync_error\") VALUES (1,'X','111',96,'2026-05-19','2026-05-19',1,'synced','2026-05-19',NULL,NULL);\n-- SNAPSHOT_END store=96\n";
 
         Http::fake([
             '*/api/pos/user' => Http::response(['id' => 1], 200),
@@ -373,7 +375,7 @@ it('preserves the local store country_id/currency_id/timezone_id across the snap
     // which is PKR on the server). Without our preservation step, POS
     // would write 50 verbatim and start displaying "Russian Ruble"
     // because POS's id=50 is RUB.
-    $sql = "INSERT OR REPLACE INTO \"stores\" (\"id\",\"name\",\"server_id\",\"currency_id\",\"created_at\",\"updated_at\") VALUES (90,'PKR store',90,50,'2026-05-20 00:00:00','2026-05-20 00:00:00');";
+    $sql = "INSERT OR REPLACE INTO \"stores\" (\"id\",\"name\",\"server_id\",\"currency_id\",\"created_at\",\"updated_at\") VALUES (90,'PKR store',90,50,'2026-05-20 00:00:00','2026-05-20 00:00:00');\n-- SNAPSHOT_END store=90\n";
 
     Http::fake([
         '*/api/pos/user' => Http::response(['id' => 1], 200),
@@ -387,6 +389,58 @@ it('preserves the local store country_id/currency_id/timezone_id across the snap
     // Local currency_id is still 7 (PKR), NOT 50 (RUB which is server's PKR id).
     $localStore = DB::table('stores')->where('id', 90)->first();
     expect((int) $localStore->currency_id)->toBe(7);
+});
+
+it('rejects a truncated snapshot (no SNAPSHOT_END marker) and rolls back the wipe — falls back to ndjson', function (): void {
+    // Production failure mode this guards against: on slow Windows
+    // machines with multi-100MB stores, the snapshot HTTP download can
+    // get cut mid-stream (server timeout, network blip, cURL stall).
+    // Guzzle doesn't always throw — we end up with a partial gzip,
+    // gzopen + gzread happily returns the data it has, the import
+    // succeeds on whatever rows made it, and the device looks "fine"
+    // but is missing thousands of records.
+    //
+    // With the marker check, the import detects the missing
+    // `-- SNAPSHOT_END` and throws — the wipe is rolled back, prior
+    // local data is restored, and the caller falls back to the slower
+    // but reliable ndjson path. NO silent partial install.
+    DB::table('stores')->insert([
+        'id' => 92, 'name' => 'Truncated snap', 'server_id' => 92,
+        'created_at' => now(), 'updated_at' => now(),
+    ]);
+    $store = Store::query()->find(92);
+
+    // Pre-seed a local customer so we can prove it survives the failed
+    // truncated import (wipe was rolled back).
+    DB::table('customers')->insert([
+        'id' => 5000,
+        'store_id' => $store->id,
+        'name' => 'Existing local — must survive truncation',
+        'phone' => '5559200',
+        'sync_state' => 'synced',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    // Truncated dump: looks like the server's response was cut off
+    // before the COMMIT + `-- SNAPSHOT_END` line.
+    $truncatedSql = "INSERT OR REPLACE INTO \"customers\" (\"id\",\"name\",\"phone\",\"store_id\",\"created_at\",\"updated_at\",\"server_id\",\"sync_state\",\"synced_at\",\"local_id\",\"sync_error\") VALUES (777,'Snap row','5559777',92,'2026-05-20 00:00:00','2026-05-20 00:00:00',777,'synced','2026-05-20 00:00:00',NULL,NULL);";
+
+    Http::fake([
+        '*/api/pos/user' => Http::response(['id' => 1], 200),
+        '*/api/pos/v2/stores/92/snapshot' => Http::response(gzencode($truncatedSql), 200, [
+            'Content-Type' => 'application/gzip',
+        ]),
+    ]);
+
+    $result = app(CloudSyncService::class)->runSnapshotBootstrap('https://cloud.example.test', 'token', $store);
+
+    // Snapshot import was rejected.
+    expect($result['ok'])->toBeFalse();
+    expect($result['fallback'] ?? null)->toBe('ndjson');
+
+    // Pre-existing local data is INTACT — the wipe was rolled back.
+    expect(DB::table('customers')->where('id', 5000)->exists())->toBeTrue();
 });
 
 it('issues PRAGMA foreign_keys=OFF before the import transaction and PRAGMA foreign_keys=ON after', function (): void {
@@ -409,7 +463,7 @@ it('issues PRAGMA foreign_keys=OFF before the import transaction and PRAGMA fore
     ]);
     $store = Store::query()->find(89);
 
-    $sql = "INSERT OR REPLACE INTO \"customers\" (\"id\",\"name\",\"phone\",\"store_id\",\"created_at\",\"updated_at\",\"server_id\",\"sync_state\",\"synced_at\",\"local_id\",\"sync_error\") VALUES (901,'Alice','5550901',89,'2026-05-20 00:00:00','2026-05-20 00:00:00',901,'synced','2026-05-20 00:00:00',NULL,NULL);";
+    $sql = "INSERT OR REPLACE INTO \"customers\" (\"id\",\"name\",\"phone\",\"store_id\",\"created_at\",\"updated_at\",\"server_id\",\"sync_state\",\"synced_at\",\"local_id\",\"sync_error\") VALUES (901,'Alice','5550901',89,'2026-05-20 00:00:00','2026-05-20 00:00:00',901,'synced','2026-05-20 00:00:00',NULL,NULL);\n-- SNAPSHOT_END store=89\n";
 
     Http::fake([
         '*/api/pos/user' => Http::response(['id' => 1], 200),

@@ -853,11 +853,15 @@ class CloudSyncService
 
                     $buffer = '';
                     $bufferLimitBytes = 8 * 1024 * 1024; // 8 MB
+                    $sawEndMarker = false;
 
                     while (! gzeof($handle)) {
                         $chunk = gzread($handle, 65536);
                         if ($chunk === false || $chunk === '') {
                             break;
+                        }
+                        if (str_contains($chunk, '-- SNAPSHOT_END')) {
+                            $sawEndMarker = true;
                         }
                         $buffer .= $chunk;
 
@@ -877,7 +881,29 @@ class CloudSyncService
 
                     // Drain the tail.
                     if (trim($buffer) !== '') {
+                        if (str_contains($buffer, '-- SNAPSHOT_END')) {
+                            $sawEndMarker = true;
+                        }
                         $this->execSnapshotChunk($buffer);
+                    }
+
+                    // CRITICAL: the server emits `-- SNAPSHOT_END` as the
+                    // very last line of every complete dump. If it's
+                    // missing, the download was truncated mid-stream
+                    // (server timeout, network blip, NativePHP cURL
+                    // stall on Windows with multi-100MB downloads). The
+                    // wipe already cleared the local data, but throwing
+                    // here rolls the transaction back — the previous
+                    // local data is restored, and the caller falls back
+                    // to the slower-but-reliable ndjson path. Without
+                    // this check, a customer with millions of records
+                    // would silently get a partial install and see
+                    // "missing customers" the next day.
+                    if (! $sawEndMarker) {
+                        throw new RuntimeException(
+                            'Snapshot download was truncated — end-of-dump marker missing. '.
+                            'The transaction has been rolled back; falling back to the legacy bootstrap path.'
+                        );
                     }
                 });
             } finally {

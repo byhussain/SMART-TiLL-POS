@@ -209,7 +209,7 @@ it('runForceReconcile uses the fast snapshot path when available (Phase 2)', fun
     $snapshotHit = false;
     $v1Hit = false;
 
-    $snapshotSql = "INSERT OR REPLACE INTO \"customers\" (\"id\",\"name\",\"phone\",\"store_id\",\"created_at\",\"updated_at\",\"server_id\",\"sync_state\",\"synced_at\",\"local_id\",\"sync_error\") VALUES (200,'Snap','5550200',1,'2026-05-20 00:00:00','2026-05-20 00:00:00',200,'synced','2026-05-20 00:00:00',NULL,NULL);";
+    $snapshotSql = "INSERT OR REPLACE INTO \"customers\" (\"id\",\"name\",\"phone\",\"store_id\",\"created_at\",\"updated_at\",\"server_id\",\"sync_state\",\"synced_at\",\"local_id\",\"sync_error\") VALUES (200,'Snap','5550200',1,'2026-05-20 00:00:00','2026-05-20 00:00:00',200,'synced','2026-05-20 00:00:00',NULL,NULL);\n-- SNAPSHOT_END store=1\n";
 
     Http::fake(function ($request) use (&$snapshotHit, &$v1Hit, $snapshotSql) {
         $url = $request->url();
