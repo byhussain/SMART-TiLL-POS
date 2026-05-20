@@ -1130,10 +1130,28 @@ class CloudSyncService
 
     /**
      * One-shot repair for an existing install whose local data drifted from
-     * the cloud during the period when sync had bugs (line items dropped,
-     * pushes silenced by withoutEvents, etc.). Pushes anything still pending
-     * locally, then re-pulls every resource fresh (no `since` cursor) so the
-     * server's view becomes the local view for any rows the device missed.
+     * the cloud (line items dropped, pushes silenced, etc.).
+     *
+     * Three phases:
+     *
+     *   1. Replay parked inbound rows + push everything the device still
+     *      owes the cloud (pending/failed rows + tombstones). This MUST
+     *      complete cleanly — if any row still can't push, we abort
+     *      before the destructive snapshot wipe so unpushed local edits
+     *      are never lost. The user is asked to resolve the push errors
+     *      and retry.
+     *
+     *   2. Snapshot bootstrap — re-download the server's complete
+     *      authoritative view as a gzipped SQL dump and INSERT OR REPLACE
+     *      every row. 10–50× faster than the legacy row-by-row pull and
+     *      semantically equivalent now that Phase 1 guarantees the server
+     *      has every local edit. Falls back to the legacy ndjson pull if
+     *      the snapshot endpoint is unavailable or import fails — so
+     *      older servers and edge cases still work, just slower.
+     *
+     *   3. Reset the delta cursor so the next regular sync starts from
+     *      now, not from a stale "last successful delta" timestamp that
+     *      might miss server-side rows that arrived during the repair.
      *
      * Safe to run multiple times — the underlying upserts are idempotent.
      */
@@ -1150,25 +1168,52 @@ class CloudSyncService
 
         $localStoreId = (int) $localStore->id;
 
-        // Replay any previously parked inbound rows in case the missing
-        // dependency has since landed.
+        // Phase 0: replay any previously parked inbound rows in case the
+        // missing dependency has since landed.
         $this->processPendingInboundRows($localStoreId);
 
-        // Phase 1: ship anything the device still owes the cloud BEFORE we
-        // ask the cloud for a fresh view. Otherwise the next pull might
-        // re-overwrite local rows we just lost track of.
+        // Phase 1: push everything pending. We don't supply a deadline —
+        // repair sync is user-initiated and the user is waiting; we want
+        // every row to either succeed or surface a clear error.
         $pushed = $this->pushPendingRowsV2($baseUrl, $token, $serverStoreId, $localStoreId, self::PULL_ORDER);
         $this->pushTombstonesV2($baseUrl, $token, $serverStoreId, $localStoreId, self::PULL_ORDER);
 
-        // Phase 2: pull every resource fresh. pullAllResources ignores the
-        // delta cursor — it walks the v1 paginated endpoint for each table,
-        // upserting rows in PULL_ORDER. Anything still missing dependencies
-        // gets parked in pending_inbound_sync_rows for the next sync.
-        $pulled = $this->pullAllResources($baseUrl, $token, $serverStoreId, $localStoreId, self::PULL_ORDER);
+        // SAFETY CHECK: if any rows remain `sync_state=pending` or
+        // `sync_state=failed` after Phase 1, the server hasn't accepted
+        // them yet. We must NOT proceed to the snapshot wipe — it would
+        // destroy unpushed local edits. Ask the user to resolve the push
+        // errors first and try again.
+        $unpushedCount = $this->countUnpushedLocalRows($localStoreId);
+        if ($unpushedCount > 0) {
+            return [
+                'ok' => false,
+                'mode' => 'reconcile',
+                'pushed' => $pushed,
+                'message' => "Unable to repair: {$unpushedCount} local row(s) could not be pushed to the cloud. Resolve the sync errors (visible in the sync status panel) and try again.",
+                'unpushed' => $unpushedCount,
+            ];
+        }
 
-        // Reset the delta cursor so the next regular sync starts from now,
-        // not from a stale "last successful delta" timestamp that might miss
-        // rows server-side.
+        // Phase 2: snapshot bootstrap — the fast path. Phase 1 guarantees
+        // server has every local edit, so wiping + reimporting is safe.
+        $snapshotResult = $this->runSnapshotBootstrap($baseUrl, $token, $localStore);
+
+        if (($snapshotResult['ok'] ?? false) === true) {
+            $pulled = (int) ($snapshotResult['installed'] ?? 0);
+            $reconcileMode = 'reconcile-snapshot';
+        } else {
+            // Fallback: snapshot endpoint unavailable (older server) or
+            // the import threw. Use the legacy slow-but-reliable path so
+            // repair still completes.
+            $pulled = $this->pullAllResources($baseUrl, $token, $serverStoreId, $localStoreId, self::PULL_ORDER);
+            $reconcileMode = 'reconcile-ndjson';
+            Log::warning('cloud-sync: repair snapshot failed, used legacy ndjson fallback', [
+                'store_id' => $localStoreId,
+                'snapshot_message' => (string) ($snapshotResult['message'] ?? ''),
+            ]);
+        }
+
+        // Phase 3: reset the delta cursor.
         $runtimeStateService = app(RuntimeStateService::class);
         $runtimeStateService->updateStoreSyncState($localStoreId, [
             'last_delta_pull_at' => now()->toDateTimeString(),
@@ -1177,10 +1222,42 @@ class CloudSyncService
 
         return [
             'ok' => true,
-            'mode' => 'reconcile',
+            'mode' => $reconcileMode,
             'pushed' => $pushed,
             'pulled' => $pulled,
         ];
+    }
+
+    /**
+     * Count rows across every syncable table that the device still owes
+     * the cloud (sync_state in pending/failed). Used by repair sync as
+     * the safety check before the destructive snapshot wipe.
+     */
+    private function countUnpushedLocalRows(int $localStoreId): int
+    {
+        $total = 0;
+
+        foreach (self::PULL_ORDER as $table) {
+            if (! $this->cachedHasTable($table) || ! $this->cachedHasColumn($table, 'sync_state')) {
+                continue;
+            }
+
+            $total += (int) $this->applyStoreScope(DB::table($table), $table, $localStoreId)
+                ->whereIn('sync_state', ['pending', 'failed'])
+                ->count();
+        }
+
+        // Also count tombstones still pending in sync_outbox — they're a
+        // separate flavour of "owed to cloud" but equally destructive
+        // to wipe before they ship.
+        if (Schema::hasTable('sync_outbox')) {
+            $total += (int) DB::table('sync_outbox')
+                ->where('operation', 'delete')
+                ->whereIn('status', ['pending', 'failed'])
+                ->count();
+        }
+
+        return $total;
     }
 
     public function runDeltaSync(

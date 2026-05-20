@@ -203,31 +203,33 @@ it('drops the concurrent push when the cache lock is already held by another wor
     $lock->release();
 });
 
-it('runForceReconcile pushes pending rows then re-pulls everything fresh', function (): void {
+it('runForceReconcile uses the fast snapshot path when available (Phase 2)', function (): void {
     $store = Store::query()->create(['name' => 'Main', 'server_id' => 1]);
 
-    $pulledTables = [];
+    $snapshotHit = false;
+    $v1Hit = false;
 
-    Http::fake(function ($request) use (&$pulledTables) {
+    $snapshotSql = "INSERT OR REPLACE INTO \"customers\" (\"id\",\"name\",\"phone\",\"store_id\",\"created_at\",\"updated_at\",\"server_id\",\"sync_state\",\"synced_at\",\"local_id\",\"sync_error\") VALUES (200,'Snap','5550200',1,'2026-05-20 00:00:00','2026-05-20 00:00:00',200,'synced','2026-05-20 00:00:00',NULL,NULL);";
+
+    Http::fake(function ($request) use (&$snapshotHit, &$v1Hit, $snapshotSql) {
         $url = $request->url();
 
         if (str_ends_with($url, '/api/pos/user')) {
             return Http::response(['id' => 1], 200);
         }
-        if (str_contains($url, '/delta/upsert')) {
-            return Http::response([
-                'resources' => [['resource' => 'customers', 'results' => []]],
-            ], 200);
+        if (str_contains($url, '/delta/upsert') || str_contains($url, '/delta/tombstones')) {
+            return Http::response(['resources' => []], 200);
         }
-        // The v1 sync endpoint is what pullAllResources hits — collect them
-        // so we can prove every resource was requested.
-        if (preg_match('#/api/pos/v1/stores/1/sync/([^?]+)#', $url, $m)) {
-            $pulledTables[] = $m[1];
+        if (str_contains($url, '/api/pos/v2/stores/1/snapshot')) {
+            $snapshotHit = true;
 
-            return Http::response([
-                'data' => [],
-                'meta' => ['current_page' => 1, 'last_page' => 1],
-            ], 200);
+            return Http::response(gzencode($snapshotSql), 200, ['Content-Type' => 'application/gzip']);
+        }
+        // The slow v1 endpoint should NOT be hit when snapshot succeeds.
+        if (preg_match('#/api/pos/v1/stores/1/sync/#', $url)) {
+            $v1Hit = true;
+
+            return Http::response(['data' => [], 'meta' => ['current_page' => 1, 'last_page' => 1]], 200);
         }
 
         return Http::response([], 200);
@@ -236,13 +238,90 @@ it('runForceReconcile pushes pending rows then re-pulls everything fresh', funct
     $result = app(CloudSyncService::class)->runForceReconcile('https://cloud.example.test', 'token', $store);
 
     expect($result['ok'])->toBeTrue();
-    expect($result['mode'])->toBe('reconcile');
-    // PULL_ORDER includes ~22 resources; verify the big ones were all hit.
-    expect($pulledTables)->toContain('sales');
-    expect($pulledTables)->toContain('sale_variation');
-    expect($pulledTables)->toContain('variations');
-    expect($pulledTables)->toContain('stocks');
-    expect($pulledTables)->toContain('customers');
+    expect($result['mode'])->toBe('reconcile-snapshot');
+    expect($snapshotHit)->toBeTrue('snapshot endpoint should have been called');
+    expect($v1Hit)->toBeFalse('slow v1 pull should NOT have been used when snapshot succeeded');
+});
+
+it('runForceReconcile falls back to the legacy ndjson pull when the snapshot endpoint is unavailable', function (): void {
+    $store = Store::query()->create(['name' => 'Main', 'server_id' => 1]);
+
+    $v1Hit = false;
+
+    Http::fake(function ($request) use (&$v1Hit) {
+        $url = $request->url();
+
+        if (str_ends_with($url, '/api/pos/user')) {
+            return Http::response(['id' => 1], 200);
+        }
+        if (str_contains($url, '/delta/upsert') || str_contains($url, '/delta/tombstones')) {
+            return Http::response(['resources' => []], 200);
+        }
+        if (str_contains($url, '/api/pos/v2/stores/1/snapshot')) {
+            return Http::response(['message' => 'Not deployed yet'], 404);
+        }
+        if (preg_match('#/api/pos/v1/stores/1/sync/#', $url)) {
+            $v1Hit = true;
+
+            return Http::response(['data' => [], 'meta' => ['current_page' => 1, 'last_page' => 1]], 200);
+        }
+
+        return Http::response([], 200);
+    });
+
+    $result = app(CloudSyncService::class)->runForceReconcile('https://cloud.example.test', 'token', $store);
+
+    expect($result['ok'])->toBeTrue();
+    expect($result['mode'])->toBe('reconcile-ndjson');
+    expect($v1Hit)->toBeTrue('legacy pull must run when snapshot fails (404 here)');
+});
+
+it('runForceReconcile aborts BEFORE the snapshot wipe when local rows could not be pushed', function (): void {
+    // Reproduce the failure mode the safety check protects against: a
+    // local customer is pending and the server REJECTS the push. The
+    // repair sync must NOT proceed to wipe local data — that would
+    // destroy the unpushed edit.
+    $store = Store::query()->create(['name' => 'Main', 'server_id' => 1]);
+
+    DB::table('customers')->insert([
+        'store_id' => $store->id,
+        'name' => 'Unpushed local',
+        'phone' => '5559001',
+        'sync_state' => 'pending',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    $snapshotHit = false;
+
+    Http::fake(function ($request) use (&$snapshotHit) {
+        $url = $request->url();
+
+        if (str_ends_with($url, '/api/pos/user')) {
+            return Http::response(['id' => 1], 200);
+        }
+        if (str_contains($url, '/delta/upsert')) {
+            // Server rejects the push.
+            return Http::response(['message' => 'Validation failed'], 422);
+        }
+        if (str_contains($url, '/snapshot')) {
+            $snapshotHit = true;
+
+            return Http::response('', 200);
+        }
+
+        return Http::response([], 200);
+    });
+
+    $result = app(CloudSyncService::class)->runForceReconcile('https://cloud.example.test', 'token', $store);
+
+    // Aborted, not OK. Local row preserved.
+    expect($result['ok'])->toBeFalse();
+    expect($result['unpushed'] ?? 0)->toBeGreaterThan(0);
+    expect($snapshotHit)->toBeFalse('snapshot must NOT run when there are unpushed local rows');
+
+    // Local row still alive — repair didn't destroy it.
+    expect(DB::table('customers')->where('phone', '5559001')->count())->toBe(1);
 });
 
 it('reconcile artisan command short-circuits when cloud is not connected', function (): void {
