@@ -10,6 +10,7 @@ use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use RuntimeException;
 use SmartTill\Core\Models\Country;
@@ -641,7 +642,10 @@ class CloudSyncService
         }
 
         $runtimeStateService = app(RuntimeStateService::class);
-        $runtimeStateService->markBootstrapStarted((int) $localStore->id, 'snapshot-'.now()->format('YmdHis'), 'Requesting store snapshot');
+        // Path-specific label so the bootstrap UI surfaces which mechanism
+        // is actually running. If the user sees "Full bootstrap (legacy
+        // path)" later in the same install, they know snapshot fell back.
+        $runtimeStateService->markBootstrapStarted((int) $localStore->id, 'snapshot-'.now()->format('YmdHis'), 'Snapshot bootstrap — requesting store data');
 
         // Tell the server which columns we have per table. The server emits
         // INSERT statements containing only those columns, with sync
@@ -670,6 +674,10 @@ class CloudSyncService
             if (file_exists($snapshotPath)) {
                 @unlink($snapshotPath);
             }
+            Log::warning('cloud-sync: snapshot download threw, falling back to ndjson', [
+                'store_id' => $localStore->id,
+                'exception' => $exception->getMessage(),
+            ]);
 
             return ['ok' => false, 'message' => $exception->getMessage(), 'fallback' => 'ndjson'];
         }
@@ -684,10 +692,21 @@ class CloudSyncService
             // 404 = snapshot endpoint not deployed on this server version.
             // 422 = validation failure (rare). Either way: fall back gracefully.
             if (in_array($status, [404, 422], true)) {
+                Log::warning('cloud-sync: snapshot endpoint returned non-ok, falling back to ndjson', [
+                    'store_id' => $localStore->id,
+                    'http_status' => $status,
+                    'server_message' => $message,
+                ]);
+
                 return ['ok' => false, 'fallback' => 'ndjson', 'message' => $message];
             }
 
             $runtimeStateService->markBootstrapFailed((int) $localStore->id, $message);
+            Log::error('cloud-sync: snapshot endpoint hard-failed', [
+                'store_id' => $localStore->id,
+                'http_status' => $status,
+                'server_message' => $message,
+            ]);
 
             return ['ok' => false, 'message' => $message];
         }
@@ -702,7 +721,7 @@ class CloudSyncService
             }
         }
 
-        $runtimeStateService->updateBootstrapProgress((int) $localStore->id, 40, 'Snapshot downloaded; installing');
+        $runtimeStateService->updateBootstrapProgress((int) $localStore->id, 40, 'Snapshot downloaded — installing (fast path)');
 
         try {
             $rowsApplied = $this->installSnapshotFromFile($snapshotPath, (int) $localStore->id);
@@ -718,6 +737,11 @@ class CloudSyncService
             // DB::transaction). Fall back to the ndjson path so the user
             // gets SOMETHING rather than a dead screen.
             $runtimeStateService->markBootstrapFailed((int) $localStore->id, 'Snapshot install failed; falling back to row-by-row bootstrap.');
+            Log::error('cloud-sync: snapshot import threw, falling back to ndjson', [
+                'store_id' => $localStore->id,
+                'exception' => $throwable->getMessage(),
+                'trace' => $throwable->getTraceAsString(),
+            ]);
 
             return ['ok' => false, 'fallback' => 'ndjson', 'message' => $throwable->getMessage()];
         } finally {
@@ -941,7 +965,11 @@ class CloudSyncService
 
         $generation = (string) ($bootstrapResponse->json('generation') ?? '');
         $manifest = (array) ($bootstrapResponse->json('manifest') ?? []);
-        $runtimeStateService->markBootstrapStarted((int) $localStore->id, $generation, 'Downloading store data');
+        // Mark this run as the legacy ndjson path so the UI can show which
+        // mechanism is in use. If the user sees this label, snapshot fell
+        // back — check storage/logs/laravel.log for "cloud-sync: snapshot"
+        // entries to learn why.
+        $runtimeStateService->markBootstrapStarted((int) $localStore->id, $generation, 'Legacy bootstrap — downloading store data');
 
         // No total-time cap on the bootstrap download — the snapshot can be
         // arbitrarily large and we cannot predict a safe upper bound for the
