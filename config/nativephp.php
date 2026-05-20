@@ -8,7 +8,7 @@ return [
      * It is used to determine if the app needs to be updated.
      * Increment this value every time you release a new version of your app.
      */
-    'version' => '2.1.1',
+    'version' => '2.1.2',
 
     /**
      * The ID of your application. This should be a unique identifier
@@ -155,9 +155,18 @@ return [
 
     /**
      * The queue workers that get auto-started on your application start.
+     *
+     * `connection => background` is EXPLICIT here (not relying on
+     * config/queue.php's auto-switch closure). Without this, a build-time
+     * `php artisan config:cache` can freeze queue.default to 'database'
+     * when DB_CONNECTION isn't 'sqlite' at build time, and the spawned
+     * worker then runs DatabaseQueue::pop on SQLite — which races with our
+     * own DB::transaction usage and throws "cannot start a transaction
+     * within a transaction" mid-poll, killing the queue worker.
      */
     'queue_workers' => [
         'default' => [
+            'connection' => 'background',
             'queues' => ['default'],
             'memory_limit' => 512,
             'timeout' => 1800,

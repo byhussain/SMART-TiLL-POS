@@ -46,6 +46,19 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        // NativePHP's NativeServiceProvider::configureApp() unconditionally
+        // forces `queue.default = 'database'` and points it at its own
+        // `nativephp` SQLite connection during its `boot()`. Our config-file
+        // setting and our register()-time override BOTH run before that and
+        // get overwritten.
+        //
+        // The Application::booted() callback fires AFTER every service
+        // provider has booted, so this runs last and wins — regardless of
+        // provider order or NativePHP version.
+        $this->app->booted(function (): void {
+            $this->forceBackgroundQueueOnSqlite();
+        });
+
         $this->hardenSqliteConnections();
 
         $observer = app(DispatchCloudSyncObserver::class);
@@ -93,6 +106,29 @@ class AppServiceProvider extends ServiceProvider
             // No DB available yet (e.g. running `artisan key:generate` with
             // no DB file). Safe to ignore — the listener above will pick up
             // the first real connection.
+        }
+    }
+
+    /**
+     * Belt-and-suspenders guard against the queue worker trying to use the
+     * `database` driver against SQLite. The database driver opens its own
+     * transaction in `DatabaseQueue::pop()` to atomically reserve a job —
+     * which races with our own DB::transaction usage (snapshot import,
+     * upsertPulledRows, etc.) and throws "cannot start a transaction
+     * within a transaction" mid-poll, killing the daemon.
+     *
+     * Runs from register() so it takes effect BEFORE the QueueManager
+     * resolves the default connection — including inside the spawned
+     * `queue:work` worker process where config/queue.php's auto-switch
+     * closure may have been frozen by a stale config:cache.
+     */
+    private function forceBackgroundQueueOnSqlite(): void
+    {
+        $dbConnection = (string) config('database.default', 'sqlite');
+        $queueDefault = (string) config('queue.default', 'sync');
+
+        if ($dbConnection === 'sqlite' && $queueDefault === 'database') {
+            config(['queue.default' => 'background']);
         }
     }
 
