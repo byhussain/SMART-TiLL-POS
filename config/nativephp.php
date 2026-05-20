@@ -8,7 +8,7 @@ return [
      * It is used to determine if the app needs to be updated.
      * Increment this value every time you release a new version of your app.
      */
-    'version' => '2.1.5',
+    'version' => '2.1.6',
 
     /**
      * The ID of your application. This should be a unique identifier
@@ -156,18 +156,19 @@ return [
     /**
      * The queue workers that get auto-started on your application start.
      *
-     * `connection => sync` makes the spawned `queue:work` daemon a no-op
-     * (sync queue has no pop() — the daemon just idles). All actual job
-     * execution happens INLINE at dispatch time via SyncQueue::push.
-     * This is the only queue strategy that works reliably with NativePHP
-     * + SQLite — see AppServiceProvider::forceBackgroundQueueOnSqlite()
-     * for the full reasoning (database driver races with our own
-     * DB::transaction usage; background driver's defer mechanism doesn't
-     * fire inside the bundled PHP runtime so jobs are silently dropped).
+     * `connection => database` matches what NativePHP's
+     * NativeServiceProvider::configureApp() forces at runtime, and is
+     * the only driver where the spawned `queue:work` daemon actually
+     * processes jobs. AppServiceProvider's connection-established hook
+     * (`rescueStalePdoTransaction`) guards against the
+     * "cannot start a transaction within a transaction" error by
+     * forcibly rolling back any open PDO transaction before the worker's
+     * next pop() — so even if a previous job poisoned the state, the
+     * worker recovers on its next iteration.
      */
     'queue_workers' => [
         'default' => [
-            'connection' => 'sync',
+            'connection' => 'database',
             'queues' => ['default'],
             'memory_limit' => 512,
             'timeout' => 1800,

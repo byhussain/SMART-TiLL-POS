@@ -38,20 +38,7 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        // Layer 3 of the SQLite/database-queue guard (see
-        // forceBackgroundQueueOnSqlite). Fires whenever something resolves
-        // the QueueManager — e.g., the WorkCommand reading `manager->
-        // connection($connectionName)` after the booted callbacks have
-        // settled. setDefaultDriver flips the manager's view of the
-        // default even if config('queue.default') stays at 'database'.
-        $this->app->resolving('queue', function ($queue): void {
-            if (! $this->defaultDatabaseDriverIsSqlite()) {
-                return;
-            }
-            if (method_exists($queue, 'setDefaultDriver')) {
-                $queue->setDefaultDriver('sync');
-            }
-        });
+        //
     }
 
     /**
@@ -59,19 +46,6 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
-        // NativePHP's NativeServiceProvider::configureApp() unconditionally
-        // forces `queue.default = 'database'` and points it at its own
-        // `nativephp` SQLite connection during its `boot()`. Our config-file
-        // setting and our register()-time override BOTH run before that and
-        // get overwritten.
-        //
-        // The Application::booted() callback fires AFTER every service
-        // provider has booted, so this runs last and wins — regardless of
-        // provider order or NativePHP version.
-        $this->app->booted(function (): void {
-            $this->forceBackgroundQueueOnSqlite();
-        });
-
         $this->hardenSqliteConnections();
 
         $observer = app(DispatchCloudSyncObserver::class);
@@ -104,6 +78,7 @@ class AppServiceProvider extends ServiceProvider
                 return;
             }
 
+            $this->rescueStalePdoTransaction($connection);
             $this->applySqliteHardeningPragmas($connection);
         });
 
@@ -113,6 +88,7 @@ class AppServiceProvider extends ServiceProvider
         try {
             $defaultConnection = $this->app->make('db')->connection();
             if ($defaultConnection instanceof SQLiteConnection) {
+                $this->rescueStalePdoTransaction($defaultConnection);
                 $this->applySqliteHardeningPragmas($defaultConnection);
             }
         } catch (\Throwable) {
@@ -123,71 +99,29 @@ class AppServiceProvider extends ServiceProvider
     }
 
     /**
-     * Force the queue to the `sync` driver whenever SQLite is the active
-     * database, overriding NativePHP's runtime `queue.default = database`
-     * setting.
+     * Defensively rollback any open PDO transaction on a freshly-resolved
+     * SQLite connection.
      *
-     * Why `sync` and not `background` or `database`:
-     *
-     *   - `database`: DatabaseQueue::pop() opens its own transaction to
-     *     atomically reserve a job. On SQLite that races with our own
-     *     DB::transaction usage (snapshot import, upsertPulledRows, etc.)
-     *     and throws "cannot start a transaction within a transaction"
-     *     mid-poll, killing the daemon.
-     *
-     *   - `background`: defers each job via Concurrency::process which
-     *     relies on PHP request termination + subprocess spawn. Inside
-     *     NativePHP's bundled runtime that mechanism doesn't reliably
-     *     fire (`php` binary path resolution issues, request lifecycle
-     *     differences), so jobs are silently never executed. Observed
-     *     in production: bootstrap dispatched, never runs, UI stuck at 0%.
-     *
-     *   - `sync`: jobs run inline at dispatch time, in-process. No
-     *     daemon, no subprocess, no defer, no race. The snapshot
-     *     bootstrap blocks the cloud-connect HTTP response for its
-     *     duration (typically seconds with the snapshot path) — that's
-     *     fine; the user is waiting on the connect spinner anyway, and
-     *     the bootstrap UI immediately sees `isStoreBootstrapped=true`
-     *     when it loads.
-     *
-     * Three layers because NativePHP's `NativeServiceProvider::
-     * configureApp()` re-applies `queue.default = database` during its
-     * `boot()`, AND the spawned `queue:work` worker has no
-     * `--connection` flag so it falls back to whatever the resolved
-     * default is.
+     * This guards against the "cannot start a transaction within a
+     * transaction" error in the queue worker daemon: if a previous code
+     * path (raw SQL with BEGIN, an exception that bypassed Laravel's
+     * transaction wrapper rollback, etc.) left PDO with an open
+     * transaction, the next DatabaseQueue::pop() — which calls
+     * `beginTransaction()` — throws because PDO says "I already have
+     * one". Forcing the depth back to zero on connection establish means
+     * the worker can always recover on its next iteration even if a
+     * previous job poisoned the state.
      */
-    private function forceBackgroundQueueOnSqlite(): void
+    private function rescueStalePdoTransaction(Connection $connection): void
     {
-        if (! $this->defaultDatabaseDriverIsSqlite()) {
-            return;
+        try {
+            $pdo = $connection->getPdo();
+            while ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+        } catch (\Throwable) {
+            // PDO not yet usable, or rollBack against a clean state. Both safe to ignore.
         }
-
-        // Layer 1: flip the default driver name to `sync`.
-        if (in_array((string) config('queue.default'), ['database', 'background'], true)) {
-            config(['queue.default' => 'sync']);
-        }
-
-        // Layer 2: swap the `database` queue connection's driver itself
-        // to `sync`. Wins even when something later resets queue.default
-        // back to `database` because the resolver reads the connection
-        // config's `driver` key.
-        if (in_array((string) config('queue.connections.database.driver'), ['database', 'background'], true)) {
-            config(['queue.connections.database.driver' => 'sync']);
-        }
-    }
-
-    /**
-     * True when whichever database connection is currently the default
-     * resolves to the sqlite driver — covers the bundled `sqlite`
-     * connection AND NativePHP's `nativephp` connection (both use
-     * driver=sqlite under different connection names).
-     */
-    private function defaultDatabaseDriverIsSqlite(): bool
-    {
-        $default = (string) config('database.default', 'sqlite');
-        $driver = (string) config("database.connections.{$default}.driver", 'sqlite');
-
-        return $driver === 'sqlite';
     }
 
     private function applySqliteHardeningPragmas(Connection $connection): void
