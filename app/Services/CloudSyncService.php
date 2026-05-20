@@ -813,6 +813,20 @@ class CloudSyncService
                 throw new RuntimeException('Unable to open snapshot file.');
             }
 
+            // Capture the local store's region FK ids BEFORE the import so
+            // we can restore them after. POS's countries/currencies/timezones
+            // tables have their OWN auto-increment ids that don't match the
+            // server's; the snapshot's INSERT OR REPLACE on stores writes
+            // SERVER's region ids verbatim, which on POS point at the wrong
+            // rows (e.g., server's currency_id=50 = PKR but POS's id=50 =
+            // RUB). The login flow (ensureLocalStoreFromServer) resolved
+            // these correctly by code/name when the store was first created
+            // — we just need to keep that mapping safe through the import.
+            $preservedRegion = DB::table('stores')
+                ->where('id', $localStoreId)
+                ->select('country_id', 'currency_id', 'timezone_id')
+                ->first();
+
             // CRITICAL: turn FK enforcement OFF *outside* the transaction.
             // `PRAGMA foreign_keys` is a no-op inside a transaction in
             // SQLite — it must be issued when no transaction is open.
@@ -877,6 +891,24 @@ class CloudSyncService
             // because INSERT-OR-REPLACE on sqlite_sequence is a system
             // table write that's cleaner to do as its own step.
             $this->resetSqliteSequenceForBootstrappedTables();
+
+            // Restore the previously-resolved local region FK ids on the
+            // store row so the user keeps seeing the right currency name,
+            // timezone, etc. (See the comment near the capture above for
+            // why this is necessary.) Only restore non-null values — if
+            // the store had never been set up locally we leave whatever
+            // the server sent and accept the user may need to re-pick.
+            if ($preservedRegion !== null) {
+                $regionUpdates = array_filter([
+                    'country_id' => $preservedRegion->country_id ?? null,
+                    'currency_id' => $preservedRegion->currency_id ?? null,
+                    'timezone_id' => $preservedRegion->timezone_id ?? null,
+                ], fn ($value): bool => $value !== null);
+
+                if ($regionUpdates !== []) {
+                    DB::table('stores')->where('id', $localStoreId)->update($regionUpdates);
+                }
+            }
         } finally {
             $lock->release();
         }

@@ -344,6 +344,51 @@ it('switch middleware caps the synchronous push with a wall-clock budget so the 
     expect($capturedTimeout)->toBe(1);
 });
 
+it('preserves the local store country_id/currency_id/timezone_id across the snapshot import', function (): void {
+    // POS's countries/currencies/timezones tables have their own
+    // auto-increment ids that don't line up with the server's. The login
+    // flow (ensureLocalStoreFromServer) resolved this store's region by
+    // code/name when it was first created — that mapping must survive
+    // the snapshot import. Without preservation the snapshot's
+    // INSERT OR REPLACE on `stores` would overwrite our correctly-resolved
+    // local region ids with the server's ids, which on POS point at the
+    // WRONG rows (server's currency_id=50 = PKR but POS's id=50 = RUB).
+    DB::table('currencies')->insert([
+        ['id' => 7, 'name' => 'Pakistani Rupee', 'code' => 'PKR', 'decimal_places' => 2, 'created_at' => now(), 'updated_at' => now()],
+        ['id' => 50, 'name' => 'Russian Ruble', 'code' => 'RUB', 'decimal_places' => 2, 'created_at' => now(), 'updated_at' => now()],
+    ]);
+
+    DB::table('stores')->insert([
+        'id' => 90,
+        'name' => 'PKR store',
+        'server_id' => 90,
+        // Resolved by login flow: local PKR id is 7.
+        'currency_id' => 7,
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+    $store = Store::query()->find(90);
+
+    // Server dump emits the store row with the SERVER's currency_id (50,
+    // which is PKR on the server). Without our preservation step, POS
+    // would write 50 verbatim and start displaying "Russian Ruble"
+    // because POS's id=50 is RUB.
+    $sql = "INSERT OR REPLACE INTO \"stores\" (\"id\",\"name\",\"server_id\",\"currency_id\",\"created_at\",\"updated_at\") VALUES (90,'PKR store',90,50,'2026-05-20 00:00:00','2026-05-20 00:00:00');";
+
+    Http::fake([
+        '*/api/pos/user' => Http::response(['id' => 1], 200),
+        '*/api/pos/v2/stores/90/snapshot' => Http::response(gzencode($sql), 200, [
+            'Content-Type' => 'application/gzip',
+        ]),
+    ]);
+
+    app(CloudSyncService::class)->runSnapshotBootstrap('https://cloud.example.test', 'token', $store);
+
+    // Local currency_id is still 7 (PKR), NOT 50 (RUB which is server's PKR id).
+    $localStore = DB::table('stores')->where('id', 90)->first();
+    expect((int) $localStore->currency_id)->toBe(7);
+});
+
 it('issues PRAGMA foreign_keys=OFF before the import transaction and PRAGMA foreign_keys=ON after', function (): void {
     // Production failure mode this guards against: server dumps sometimes
     // contain a row that references a parent that ends up missing locally
