@@ -20,7 +20,7 @@ function fireAppBooted(?callable $afterBoot = null): void
     $app->boot();
 }
 
-it('forces the queue connection to background when DB is sqlite and queue is database (cannot-start-transaction guard)', function (): void {
+it('forces the queue connection to sync when DB is sqlite and queue is database (cannot-start-transaction guard)', function (): void {
     // Reproduce the production failure mode: somehow (frozen config:cache,
     // stale env, etc.) the queue connection resolves to `database` while
     // the database driver is sqlite. Without the guard, DatabaseQueue::pop
@@ -36,12 +36,12 @@ it('forces the queue connection to background when DB is sqlite and queue is dat
     fireAppBooted();
 
     // Layer 1: queue.default flipped to background.
-    expect(config('queue.default'))->toBe('background');
+    expect(config('queue.default'))->toBe('sync');
     // Layer 2: the `database` connection's driver was swapped to
     // background, so even if something resets queue.default back later,
     // QueueManager::resolve('database') returns BackgroundQueue, not
     // DatabaseQueue, and the transaction race is impossible.
-    expect(config('queue.connections.database.driver'))->toBe('background');
+    expect(config('queue.connections.database.driver'))->toBe('sync');
 });
 
 it('layer 2 wins against late NativePHP override of queue.default back to database', function (): void {
@@ -64,7 +64,7 @@ it('layer 2 wins against late NativePHP override of queue.default back to databa
     // queue.default is back to 'database' (NativePHP won that one), but
     // the database connection's driver is permanently background.
     expect(config('queue.default'))->toBe('database');
-    expect(config('queue.connections.database.driver'))->toBe('background');
+    expect(config('queue.connections.database.driver'))->toBe('sync');
 });
 
 it('treats the NativePHP-installed `nativephp` SQLite connection the same as the bundled sqlite connection', function (): void {
@@ -80,8 +80,8 @@ it('treats the NativePHP-installed `nativephp` SQLite connection the same as the
 
     fireAppBooted();
 
-    expect(config('queue.default'))->toBe('background');
-    expect(config('queue.connections.database.driver'))->toBe('background');
+    expect(config('queue.default'))->toBe('sync');
+    expect(config('queue.connections.database.driver'))->toBe('sync');
 });
 
 it('registers the override as a booted-callback so it fires AFTER all other providers boot (including NativePHP)', function (): void {
@@ -121,7 +121,7 @@ it('registers the override as a booted-callback so it fires AFTER all other prov
     // NativePHP's earlier override.
     expect($app->isBooted())->toBeTrue();
     expect($callbackFiredAfterBoot)->toBeTrue();
-    expect($app['config']->get('queue.default'))->toBe('background');
+    expect($app['config']->get('queue.default'))->toBe('sync');
 });
 
 it('leaves the queue connection alone when the database is not sqlite', function (): void {
@@ -133,7 +133,7 @@ it('leaves the queue connection alone when the database is not sqlite', function
     fireAppBooted();
 
     // Don't second-guess valid configurations — MySQL + database queue
-    // is fine and shouldn't be forced to background.
+    // is fine and shouldn't be forced to sync.
     expect(config('queue.default'))->toBe('database');
 });
 

@@ -49,7 +49,7 @@ class AppServiceProvider extends ServiceProvider
                 return;
             }
             if (method_exists($queue, 'setDefaultDriver')) {
-                $queue->setDefaultDriver('background');
+                $queue->setDefaultDriver('sync');
             }
         });
     }
@@ -123,35 +123,38 @@ class AppServiceProvider extends ServiceProvider
     }
 
     /**
-     * Belt-and-suspenders guard against the queue worker trying to use the
-     * `database` driver against SQLite. The database driver opens its own
-     * transaction in `DatabaseQueue::pop()` to atomically reserve a job —
-     * which races with our own DB::transaction usage (snapshot import,
-     * upsertPulledRows, etc.) and throws "cannot start a transaction
-     * within a transaction" mid-poll, killing the daemon.
+     * Force the queue to the `sync` driver whenever SQLite is the active
+     * database, overriding NativePHP's runtime `queue.default = database`
+     * setting.
      *
-     * Three layers, because NativePHP unconditionally re-applies
-     * `queue.default = database` from its own configureApp() during
-     * packageBooted, AND the worker is spawned as `queue:work` with no
-     * --connection flag so it falls back to that config:
+     * Why `sync` and not `background` or `database`:
      *
-     *   1. Flip `queue.default` from `database` to `background` so any
-     *      caller falling back to the default gets the safe driver.
+     *   - `database`: DatabaseQueue::pop() opens its own transaction to
+     *     atomically reserve a job. On SQLite that races with our own
+     *     DB::transaction usage (snapshot import, upsertPulledRows, etc.)
+     *     and throws "cannot start a transaction within a transaction"
+     *     mid-poll, killing the daemon.
      *
-     *   2. Swap the `database` connection's DRIVER itself to `background`.
-     *      This wins even when `queue.default` somehow ends up as
-     *      `database` again later — QueueManager::resolve('database')
-     *      reads the driver from the connection config and dispatches via
-     *      the background connector instead of DatabaseQueue.
+     *   - `background`: defers each job via Concurrency::process which
+     *     relies on PHP request termination + subprocess spawn. Inside
+     *     NativePHP's bundled runtime that mechanism doesn't reliably
+     *     fire (`php` binary path resolution issues, request lifecycle
+     *     differences), so jobs are silently never executed. Observed
+     *     in production: bootstrap dispatched, never runs, UI stuck at 0%.
      *
-     *   3. Register an app->resolving hook on the `queue` singleton so
-     *      anything that resolves the QueueManager (e.g., direct facade
-     *      use) also has the default driver flipped at that moment.
+     *   - `sync`: jobs run inline at dispatch time, in-process. No
+     *     daemon, no subprocess, no defer, no race. The snapshot
+     *     bootstrap blocks the cloud-connect HTTP response for its
+     *     duration (typically seconds with the snapshot path) — that's
+     *     fine; the user is waiting on the connect spinner anyway, and
+     *     the bootstrap UI immediately sees `isStoreBootstrapped=true`
+     *     when it loads.
      *
-     * Sqlite check is on `database.connections.<default>.driver` rather
-     * than the connection NAME so we catch the NativePHP-installed
-     * `nativephp` connection too (which has driver=sqlite but a non-
-     * `sqlite` name).
+     * Three layers because NativePHP's `NativeServiceProvider::
+     * configureApp()` re-applies `queue.default = database` during its
+     * `boot()`, AND the spawned `queue:work` worker has no
+     * `--connection` flag so it falls back to whatever the resolved
+     * default is.
      */
     private function forceBackgroundQueueOnSqlite(): void
     {
@@ -159,17 +162,17 @@ class AppServiceProvider extends ServiceProvider
             return;
         }
 
-        // Layer 1: default driver.
-        if ((string) config('queue.default') === 'database') {
-            config(['queue.default' => 'background']);
+        // Layer 1: flip the default driver name to `sync`.
+        if (in_array((string) config('queue.default'), ['database', 'background'], true)) {
+            config(['queue.default' => 'sync']);
         }
 
-        // Layer 2: swap the `database` queue connection itself to use
-        // the background driver. Survives any later reset of
-        // queue.default = database because the resolver reads the
-        // connection config's `driver` key.
-        if ((string) config('queue.connections.database.driver') === 'database') {
-            config(['queue.connections.database.driver' => 'background']);
+        // Layer 2: swap the `database` queue connection's driver itself
+        // to `sync`. Wins even when something later resets queue.default
+        // back to `database` because the resolver reads the connection
+        // config's `driver` key.
+        if (in_array((string) config('queue.connections.database.driver'), ['database', 'background'], true)) {
+            config(['queue.connections.database.driver' => 'sync']);
         }
     }
 
