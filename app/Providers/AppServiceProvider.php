@@ -38,7 +38,20 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        // Layer 3 of the SQLite/database-queue guard (see
+        // forceBackgroundQueueOnSqlite). Fires whenever something resolves
+        // the QueueManager — e.g., the WorkCommand reading `manager->
+        // connection($connectionName)` after the booted callbacks have
+        // settled. setDefaultDriver flips the manager's view of the
+        // default even if config('queue.default') stays at 'database'.
+        $this->app->resolving('queue', function ($queue): void {
+            if (! $this->defaultDatabaseDriverIsSqlite()) {
+                return;
+            }
+            if (method_exists($queue, 'setDefaultDriver')) {
+                $queue->setDefaultDriver('background');
+            }
+        });
     }
 
     /**
@@ -117,19 +130,61 @@ class AppServiceProvider extends ServiceProvider
      * upsertPulledRows, etc.) and throws "cannot start a transaction
      * within a transaction" mid-poll, killing the daemon.
      *
-     * Runs from register() so it takes effect BEFORE the QueueManager
-     * resolves the default connection — including inside the spawned
-     * `queue:work` worker process where config/queue.php's auto-switch
-     * closure may have been frozen by a stale config:cache.
+     * Three layers, because NativePHP unconditionally re-applies
+     * `queue.default = database` from its own configureApp() during
+     * packageBooted, AND the worker is spawned as `queue:work` with no
+     * --connection flag so it falls back to that config:
+     *
+     *   1. Flip `queue.default` from `database` to `background` so any
+     *      caller falling back to the default gets the safe driver.
+     *
+     *   2. Swap the `database` connection's DRIVER itself to `background`.
+     *      This wins even when `queue.default` somehow ends up as
+     *      `database` again later — QueueManager::resolve('database')
+     *      reads the driver from the connection config and dispatches via
+     *      the background connector instead of DatabaseQueue.
+     *
+     *   3. Register an app->resolving hook on the `queue` singleton so
+     *      anything that resolves the QueueManager (e.g., direct facade
+     *      use) also has the default driver flipped at that moment.
+     *
+     * Sqlite check is on `database.connections.<default>.driver` rather
+     * than the connection NAME so we catch the NativePHP-installed
+     * `nativephp` connection too (which has driver=sqlite but a non-
+     * `sqlite` name).
      */
     private function forceBackgroundQueueOnSqlite(): void
     {
-        $dbConnection = (string) config('database.default', 'sqlite');
-        $queueDefault = (string) config('queue.default', 'sync');
+        if (! $this->defaultDatabaseDriverIsSqlite()) {
+            return;
+        }
 
-        if ($dbConnection === 'sqlite' && $queueDefault === 'database') {
+        // Layer 1: default driver.
+        if ((string) config('queue.default') === 'database') {
             config(['queue.default' => 'background']);
         }
+
+        // Layer 2: swap the `database` queue connection itself to use
+        // the background driver. Survives any later reset of
+        // queue.default = database because the resolver reads the
+        // connection config's `driver` key.
+        if ((string) config('queue.connections.database.driver') === 'database') {
+            config(['queue.connections.database.driver' => 'background']);
+        }
+    }
+
+    /**
+     * True when whichever database connection is currently the default
+     * resolves to the sqlite driver — covers the bundled `sqlite`
+     * connection AND NativePHP's `nativephp` connection (both use
+     * driver=sqlite under different connection names).
+     */
+    private function defaultDatabaseDriverIsSqlite(): bool
+    {
+        $default = (string) config('database.default', 'sqlite');
+        $driver = (string) config("database.connections.{$default}.driver", 'sqlite');
+
+        return $driver === 'sqlite';
     }
 
     private function applySqliteHardeningPragmas(Connection $connection): void

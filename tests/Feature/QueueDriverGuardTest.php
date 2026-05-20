@@ -29,11 +29,59 @@ it('forces the queue connection to background when DB is sqlite and queue is dat
     config([
         'database.default' => 'sqlite',
         'queue.default' => 'database',
+        'database.connections.sqlite.driver' => 'sqlite',
+        'queue.connections.database.driver' => 'database',
+    ]);
+
+    fireAppBooted();
+
+    // Layer 1: queue.default flipped to background.
+    expect(config('queue.default'))->toBe('background');
+    // Layer 2: the `database` connection's driver was swapped to
+    // background, so even if something resets queue.default back later,
+    // QueueManager::resolve('database') returns BackgroundQueue, not
+    // DatabaseQueue, and the transaction race is impossible.
+    expect(config('queue.connections.database.driver'))->toBe('background');
+});
+
+it('layer 2 wins against late NativePHP override of queue.default back to database', function (): void {
+    // The specific production scenario: NativePHP's configureApp() runs
+    // late and forces queue.default = database AFTER our booted callback
+    // fires. Layer 2 protects against this because the worker reads the
+    // CONNECTION config (driver=background) not just the default name.
+    config([
+        'database.default' => 'sqlite',
+        'queue.default' => 'database',
+        'database.connections.sqlite.driver' => 'sqlite',
+        'queue.connections.database.driver' => 'database',
+    ]);
+
+    fireAppBooted();
+
+    // Simulate NativePHP's late override:
+    config(['queue.default' => 'database']);
+
+    // queue.default is back to 'database' (NativePHP won that one), but
+    // the database connection's driver is permanently background.
+    expect(config('queue.default'))->toBe('database');
+    expect(config('queue.connections.database.driver'))->toBe('background');
+});
+
+it('treats the NativePHP-installed `nativephp` SQLite connection the same as the bundled sqlite connection', function (): void {
+    // NativePHP creates its own connection name (`nativephp`) with
+    // driver=sqlite. Our guard must trigger on the DRIVER, not the
+    // connection name, or we'd miss it.
+    config([
+        'database.default' => 'nativephp',
+        'database.connections.nativephp.driver' => 'sqlite',
+        'queue.default' => 'database',
+        'queue.connections.database.driver' => 'database',
     ]);
 
     fireAppBooted();
 
     expect(config('queue.default'))->toBe('background');
+    expect(config('queue.connections.database.driver'))->toBe('background');
 });
 
 it('registers the override as a booted-callback so it fires AFTER all other providers boot (including NativePHP)', function (): void {

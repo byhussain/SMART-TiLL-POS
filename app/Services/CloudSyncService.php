@@ -813,12 +813,23 @@ class CloudSyncService
                 throw new RuntimeException('Unable to open snapshot file.');
             }
 
+            // CRITICAL: turn FK enforcement OFF *outside* the transaction.
+            // `PRAGMA foreign_keys` is a no-op inside a transaction in
+            // SQLite — it must be issued when no transaction is open.
+            // `PRAGMA defer_foreign_keys` alone is not enough: it only
+            // delays the check until COMMIT, where it STILL throws if any
+            // ref is genuinely orphaned (e.g., a row in the dump points at
+            // an id that ends up never inserted because of ordering or a
+            // server-side data drift).
+            //
+            // The dump is server-authoritative for the entire store and
+            // we wipe-then-import inside one transaction, so disabling FK
+            // checks for the import window is safe. We restore enforcement
+            // immediately after.
+            DB::statement('PRAGMA foreign_keys = OFF');
+
             try {
                 DB::transaction(function () use ($handle): void {
-                    // Defer FK constraints to COMMIT so the loose ordering
-                    // of the dump's INSERTs across tables doesn't throw.
-                    DB::statement('PRAGMA defer_foreign_keys = ON');
-
                     // Wipe FIRST so the snapshot is authoritative. The
                     // single-store-at-a-time model means the local DB
                     // contains exactly the snapshot's data once we're done.
@@ -857,6 +868,9 @@ class CloudSyncService
                 });
             } finally {
                 gzclose($handle);
+                // Always restore FK enforcement — even on import failure —
+                // so subsequent local writes still get the safety net.
+                DB::statement('PRAGMA foreign_keys = ON');
             }
 
             // sqlite_sequence reset happens OUTSIDE the import transaction

@@ -19,7 +19,16 @@ use Symfony\Component\HttpFoundation\Response;
 uses(RefreshDatabase::class);
 
 it('imports a snapshot file in one transaction, populates server_id/sync_state, and resets sqlite_sequence', function (): void {
-    $store = Store::query()->create(['id' => 81, 'name' => 'Snap test', 'server_id' => 81]);
+    // id isn't fillable on Store, so set it explicitly via raw insert
+    // so the customer rows' FK to stores.id is satisfied. Under
+    // RefreshDatabase Pest wraps each test in a transaction which makes
+    // `PRAGMA foreign_keys=OFF` a no-op — meaning FK is enforced even
+    // though production turns it off for the import.
+    DB::table('stores')->insert([
+        'id' => 81, 'name' => 'Snap test', 'server_id' => 81,
+        'created_at' => now(), 'updated_at' => now(),
+    ]);
+    $store = Store::query()->find(81);
 
     // Craft a SQLite-compatible SQL dump exactly as the server would emit it.
     // The dump uses "" for identifiers and '' for SQL-92 escaped strings.
@@ -333,6 +342,52 @@ it('switch middleware caps the synchronous push with a wall-clock budget so the 
         ->handle($request, fn () => new Response('ok'));
 
     expect($capturedTimeout)->toBe(1);
+});
+
+it('issues PRAGMA foreign_keys=OFF before the import transaction and PRAGMA foreign_keys=ON after', function (): void {
+    // Production failure mode this guards against: server dumps sometimes
+    // contain a row that references a parent that ends up missing locally
+    // (stale id, dump ordering edge case, deleted parent server-side).
+    // With FK enforcement on, COMMIT throws "FOREIGN KEY constraint
+    // failed" and the device falls back to ndjson. Disabling FK
+    // enforcement just for the import window lets the snapshot land; the
+    // next delta sync converges any stale refs.
+    //
+    // SQLite's `PRAGMA foreign_keys` is a no-op INSIDE a transaction
+    // (which Pest's RefreshDatabase wraps every test in), so we can't
+    // observe the actual FK off/on toggle from a test. Instead, capture
+    // the sequence of statements the importer issues and assert the
+    // pragmas appear in the right order around the transaction.
+    DB::table('stores')->insert([
+        'id' => 89, 'name' => 'FK-OFF guard', 'server_id' => 89,
+        'created_at' => now(), 'updated_at' => now(),
+    ]);
+    $store = Store::query()->find(89);
+
+    $sql = "INSERT OR REPLACE INTO \"customers\" (\"id\",\"name\",\"phone\",\"store_id\",\"created_at\",\"updated_at\",\"server_id\",\"sync_state\",\"synced_at\",\"local_id\",\"sync_error\") VALUES (901,'Alice','5550901',89,'2026-05-20 00:00:00','2026-05-20 00:00:00',901,'synced','2026-05-20 00:00:00',NULL,NULL);";
+
+    Http::fake([
+        '*/api/pos/user' => Http::response(['id' => 1], 200),
+        '*/api/pos/v2/stores/89/snapshot' => Http::response(gzencode($sql), 200, [
+            'Content-Type' => 'application/gzip',
+        ]),
+    ]);
+
+    $statements = [];
+    DB::listen(function ($query) use (&$statements): void {
+        $statements[] = $query->sql;
+    });
+
+    $result = app(CloudSyncService::class)->runSnapshotBootstrap('https://cloud.example.test', 'token', $store);
+
+    expect($result['ok'])->toBeTrue($result['message'] ?? '');
+
+    $foreignKeysOff = array_search('PRAGMA foreign_keys = OFF', $statements, true);
+    $foreignKeysOn = array_search('PRAGMA foreign_keys = ON', $statements, true);
+
+    expect($foreignKeysOff)->not->toBeFalse('importer must issue PRAGMA foreign_keys = OFF');
+    expect($foreignKeysOn)->not->toBeFalse('importer must issue PRAGMA foreign_keys = ON after the import');
+    expect($foreignKeysOn)->toBeGreaterThan($foreignKeysOff, 'ON must come after OFF');
 });
 
 it('falls back to ndjson when the snapshot file is corrupted or empty', function (): void {
