@@ -102,6 +102,7 @@ class StorePanelProvider extends PanelProvider
             // and disable polling — this is an offline POS, push channels are not used.
             ->databaseNotifications(isLazy: true)
             ->databaseNotificationsPolling(null)
+            ->sidebarCollapsibleOnDesktop()
             ->renderHook(
                 PanelsRenderHook::GLOBAL_SEARCH_BEFORE,
                 fn (): View => view('filament.store.partials.cloud-sync-status'),
