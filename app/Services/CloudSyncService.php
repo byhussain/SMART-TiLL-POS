@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Store;
 use App\Models\SyncOutbox;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -2202,7 +2203,18 @@ class CloudSyncService
             }
 
             $relatedTable = (string) ($morphDefinition['table'] ?? '');
-            $canonicalClass = (string) ($morphDefinition['class'] ?? $type);
+            // Canonicalize to the morph ALIAS Eloquent will write for
+            // newly created local rows (e.g. 'App\Models\Customer'),
+            // NOT the FQCN. Storing the FQCN here breaks any later query
+            // that filters by `transactionable_type` against rows freshly
+            // created on the POS — TransactionObserver's running-balance
+            // lookup misses every bootstrapped row, so credit-sale
+            // balances start from 0 instead of including the customer's
+            // pre-existing debt.
+            $canonicalClass = $this->resolveMorphAlias(
+                (string) ($morphDefinition['class'] ?? ''),
+                $type,
+            );
 
             if ($relatedTable === '' || ! Schema::hasTable($relatedTable) || ! Schema::hasColumn($relatedTable, 'server_id')) {
                 if ($this->isNullableColumn($table, $idColumn)) {
@@ -2309,6 +2321,33 @@ class CloudSyncService
         return $lookup;
     }
 
+    /**
+     * Return the morph alias Eloquent will write for the given canonical
+     * class, falling back to the incoming type if the class can't be
+     * instantiated. This guarantees the `*_type` string we persist
+     * matches what `Model::getMorphClass()` produces for a freshly-created
+     * local row — so subsequent `where('transactionable_type', …)`
+     * queries (e.g. TransactionObserver's running-balance lookup) hit
+     * both the bootstrapped rows and the new ones.
+     */
+    private function resolveMorphAlias(string $canonicalClass, string $fallback): string
+    {
+        if ($canonicalClass !== '' && class_exists($canonicalClass)) {
+            try {
+                $instance = new $canonicalClass;
+                if ($instance instanceof Model) {
+                    return $instance->getMorphClass();
+                }
+            } catch (\Throwable) {
+                // Fall through to the FQCN fallback below.
+            }
+
+            return $canonicalClass;
+        }
+
+        return $fallback;
+    }
+
     private function isNullableColumn(string $table, string $column): bool
     {
         $cacheKey = "{$table}.{$column}";
@@ -2413,7 +2452,13 @@ class CloudSyncService
             }
 
             $relatedTable = (string) ($morphDefinition['table'] ?? '');
-            $canonicalClass = (string) ($morphDefinition['class'] ?? $type);
+            // See mapMorphRelationsToLocalIds: canonicalize to the morph
+            // alias Eloquent uses, not the FQCN, so that round-tripping
+            // bootstrap→edit→push keeps the same `*_type` string.
+            $canonicalClass = $this->resolveMorphAlias(
+                (string) ($morphDefinition['class'] ?? ''),
+                $type,
+            );
 
             if ($relatedTable === '' || ! Schema::hasTable($relatedTable) || ! Schema::hasColumn($relatedTable, 'server_id')) {
                 if ($this->isNullableColumn($table, $idColumn)) {
