@@ -2,16 +2,8 @@
 
 namespace App\Providers;
 
-use App\Listeners\AppUpdateListener;
 use Illuminate\Support\Facades\Artisan;
-use Illuminate\Support\Facades\Event;
 use Native\Desktop\Contracts\ProvidesPhpIni;
-use Native\Desktop\Events\AutoUpdater\Error as UpdateError;
-use Native\Desktop\Events\AutoUpdater\UpdateAvailable;
-use Native\Desktop\Events\AutoUpdater\UpdateDownloaded;
-use Native\Desktop\Events\AutoUpdater\UpdateNotAvailable;
-use Native\Desktop\Events\Menu\MenuItemClicked;
-use Native\Desktop\Facades\Menu;
 use Native\Desktop\Facades\Window;
 
 class NativeAppServiceProvider implements ProvidesPhpIni
@@ -24,47 +16,17 @@ class NativeAppServiceProvider implements ProvidesPhpIni
     {
         Artisan::call('native:core:install');
 
-        $this->registerMenuBar();
-        $this->registerUpdateListeners();
+        // No call to Menu::create() — Electron's built-in default menu (App,
+        // Edit, View, Window, Help on macOS) is used automatically when no
+        // setApplicationMenu() is issued. Re-asserting it here via NativePHP
+        // would just clear and rebuild the same menu, so we skip the round
+        // trip entirely.
+        //
+        // No AutoUpdater event listeners either — NATIVEPHP_UPDATER_ENABLED
+        // is off, so electron-updater never polls and these events never
+        // fire. Updates are installed manually by the user.
 
         Window::open();
-    }
-
-    /**
-     * Build the system menu bar. Adds a "Help" menu with a "Check for
-     * Updates…" item that triggers the AutoUpdater workflow handled by
-     * AppUpdateListener.
-     */
-    private function registerMenuBar(): void
-    {
-        Menu::create(
-            Menu::app(),
-            Menu::file(),
-            Menu::edit(),
-            Menu::view(),
-            Menu::window(),
-            Menu::label('Cloud')->submenu(
-                Menu::label('Sync Now')
-                    ->id(AppUpdateListener::MENU_ITEM_SYNC_NOW)
-                    ->accelerator('CmdOrCtrl+Shift+S'),
-            ),
-            Menu::label('Help')->submenu(
-                Menu::label('Check for Updates…')
-                    ->id(AppUpdateListener::MENU_ITEM_ID),
-            ),
-        );
-    }
-
-    /**
-     * Wire AutoUpdater + menu-click events to the AppUpdateListener methods.
-     */
-    private function registerUpdateListeners(): void
-    {
-        Event::listen(MenuItemClicked::class, [AppUpdateListener::class, 'handleMenuClick']);
-        Event::listen(UpdateAvailable::class, [AppUpdateListener::class, 'handleUpdateAvailable']);
-        Event::listen(UpdateNotAvailable::class, [AppUpdateListener::class, 'handleUpdateNotAvailable']);
-        Event::listen(UpdateDownloaded::class, [AppUpdateListener::class, 'handleUpdateDownloaded']);
-        Event::listen(UpdateError::class, [AppUpdateListener::class, 'handleUpdateError']);
     }
 
     /**
