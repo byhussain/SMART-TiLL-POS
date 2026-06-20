@@ -82,7 +82,12 @@ jobs:
 
   publish-macos:
     name: Publish macOS
-    runs-on: macos-latest
+    # Pinned to macOS 14 (arm64): macos-latest is now macOS 15 (Sequoia), whose
+    # codesign does stricter Mach-O validation and rejects NativePHP's bundled
+    # static `php` binary with "main executable failed strict validation".
+    # macOS 14 is the same arm64 arch but accepts the binary. Revisit once
+    # NativePHP ships a Sequoia-compatible php binary.
+    runs-on: macos-14
 
     env:
       APP_KEY: ${{ secrets.APP_KEY }}

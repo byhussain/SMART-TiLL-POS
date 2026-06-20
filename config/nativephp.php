@@ -8,7 +8,7 @@ return [
      * It is used to determine if the app needs to be updated.
      * Increment this value every time you release a new version of your app.
      */
-    'version' => '1.0.25',
+    'version' => '1.0.26',
 
     /**
      * The ID of your application. This should be a unique identifier
@@ -181,7 +181,12 @@ return [
         // boot becomes a no-op. Without this, every cold start raced multiple
         // PHP processes (web + queue workers) trying to set WAL on the same
         // file → "database is locked" errors on Windows.
-        'php -r "$db = new PDO(\'sqlite:database/database.sqlite\'); $db->exec(\'PRAGMA journal_mode=WAL\'); $db->exec(\'PRAGMA synchronous=NORMAL\');"',
+        //
+        // No `$` variables in the inline code: the command is run through a
+        // shell, and on macOS/Linux a `$db` inside double quotes would be
+        // expanded away by the shell (breaking the build), while Windows cmd
+        // leaves it intact. Using bare `(new PDO(...))` keeps it portable.
+        'php -r "(new PDO(\'sqlite:database/database.sqlite\'))->exec(\'PRAGMA journal_mode=WAL\'); (new PDO(\'sqlite:database/database.sqlite\'))->exec(\'PRAGMA synchronous=NORMAL\');"',
     ],
 
     'postbuild' => [

@@ -87,6 +87,15 @@ class CloudSyncService
         'role_has_permissions' => ['role_id', 'permission_id'],
         'user_role' => ['user_id', 'role_id', 'store_id'],
         'model_activities' => ['activityable_type', 'activityable_id'],
+        // A derived transaction has no stable cross-device id: the same
+        // sale/payment is posted independently on the server and the POS.
+        // Match on the source document it references (morph type + id are
+        // already canonicalized/remapped by mapMorphRelationsToLocalIds by
+        // the time this runs) plus the type, so the two copies collapse to
+        // one row instead of duplicating. referenceable_id is NULL for
+        // standalone transactions and orphans; the null-guard in
+        // resolveNaturalUniqueLookup skips those.
+        'transactions' => ['store_id', 'referenceable_type', 'referenceable_id', 'type'],
     ];
 
     private const FOREIGN_KEY_TABLE_MAP = [
@@ -2238,6 +2247,13 @@ class CloudSyncService
                 $payload[$typeColumn] = $canonicalClass;
             } elseif ($table === 'model_activities' && $prefix === 'activityable') {
                 $payload[$typeColumn] = $canonicalClass;
+            } elseif ($table === 'transactions' && $prefix === 'referenceable' && in_array(strtolower(class_basename($type)), ['sale', 'payment'], true)) {
+                // Defer instead of nulling: a sale/payment transaction whose
+                // source document hasn't been pulled yet must not be written
+                // with a NULL referenceable_id — that is exactly how an orphan
+                // debit/credit is born. It retries on the next pull once the
+                // parent sale/payment row exists locally.
+                $hasUnresolvedForeignKeys = true;
             } elseif ($this->isNullableColumn($table, $idColumn)) {
                 $payload[$idColumn] = null;
                 $payload[$typeColumn] = $canonicalClass;
