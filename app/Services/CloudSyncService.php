@@ -2478,6 +2478,14 @@ class CloudSyncService
             if (is_numeric($serverId)) {
                 $payload[$idColumn] = (int) $serverId;
                 $payload[$typeColumn] = $canonicalClass;
+            } elseif ($this->shouldDeferUnlinkedLedgerTransaction($table, $prefix, $type, $payload)) {
+                // A customer/supplier ledger transaction must NEVER be pushed
+                // with its sale/payment link nulled — that is exactly how an
+                // orphan debit/credit (a balance with no source document) is
+                // born on the server. Hold the row back until the parent
+                // sale/payment has synced and earned a server_id; it retries
+                // on the next push.
+                $hasUnresolvedForeignKeys = true;
             } elseif ($this->isNullableColumn($table, $idColumn)) {
                 $payload[$idColumn] = null;
                 $payload[$typeColumn] = $canonicalClass;
@@ -2490,6 +2498,29 @@ class CloudSyncService
             'payload' => $payload,
             'has_unresolved_foreign_keys' => $hasUnresolvedForeignKeys,
         ];
+    }
+
+    /**
+     * Whether to defer (rather than null) an unresolved morph link when
+     * pushing. Applies only to a customer/supplier ledger transaction's
+     * referenceable sale/payment: nulling that link would orphan the
+     * ledger row on the server, so we hold the push until the parent
+     * document has synced.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function shouldDeferUnlinkedLedgerTransaction(string $table, string $prefix, string $type, array $payload): bool
+    {
+        if ($table !== 'transactions' || $prefix !== 'referenceable') {
+            return false;
+        }
+
+        $ledgerTypes = ['customer_debit', 'customer_credit', 'supplier_debit', 'supplier_credit'];
+        if (! in_array((string) ($payload['type'] ?? ''), $ledgerTypes, true)) {
+            return false;
+        }
+
+        return in_array(strtolower(class_basename($type)), ['sale', 'payment'], true);
     }
 
     private function updateLocalRowSyncStatus(string $table, object $row, array $updates): void
